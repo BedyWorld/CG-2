@@ -23,4 +23,6 @@ struct ConstantBufferData
     XMFLOAT2 Tiling;      //  8  -- texture tiling factor (U, V)
     XMFLOAT2 UVOffset;    //  8  -- animated UV scroll offset
                           // total = 256
+    float BlendFactor;        // Новый параметр для смешивания текстур
+    float Padding[3];         // Выравнивание для 16-байтовой границы
 };

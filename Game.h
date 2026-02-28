@@ -76,6 +76,10 @@ private:
     float uvOffsetX_     = 0.0f;
     float uvOffsetY_     = 0.0f;
 
+    //cam
+    float cameraDistance_ = 3.0f;  // начальное расстояние
+    float cameraAngle_ = 0.0f;      // угол вокруг модели
+
     // D3D12 core
     ComPtr<ID3D12Device>              device_;
     ComPtr<ID3D12CommandQueue>        commandQueue_;

@@ -295,24 +295,24 @@ void Game::CreateFence()
 void Game::CreateRootSignature()
 {
     // param[0]: CBV inline descriptor (constant buffer)
-    D3D12_ROOT_PARAMETER params[2] = {};
-    params[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    D3D12_ROOT_PARAMETER params[2] = {};  // всё ещё 2 параметра, но CBV теперь содержит BlendFactor
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
-    params[0].Descriptor.RegisterSpace  = 0;
-    params[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+    params[0].Descriptor.RegisterSpace = 0;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // param[1]: descriptor table с 2 SRV (текстура A — t0, текстура B — t1)
+    // param[1]: descriptor table с 2 SRV (текстуры)
     D3D12_DESCRIPTOR_RANGE srvRange = {};
-    srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors     = 2;   // ← оба слота текстур
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 2;
     srvRange.BaseShaderRegister = 0;
-    srvRange.RegisterSpace      = 0;
+    srvRange.RegisterSpace = 0;
     srvRange.OffsetInDescriptorsFromTableStart = 0;
 
-    params[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[1].DescriptorTable.NumDescriptorRanges = 1;
-    params[1].DescriptorTable.pDescriptorRanges   = &srvRange;
-    params[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[1].ParameterType                          = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges    = 1;
+    params[1].DescriptorTable.pDescriptorRanges      = &srvRange;
+    params[1].ShaderVisibility                       = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // Static sampler (wrap + linear filter)
     D3D12_STATIC_SAMPLER_DESC sampler = {};
@@ -702,16 +702,36 @@ void Game::Update(float deltaTime)
 {
     rotationAngle_ += 0.8f * deltaTime;
 
+
+    // Для примера, будем менять расстояние автоматически
+    static float time = 0.0f;
+    time += deltaTime;
+    cameraDistance_ = 2.5f + sinf(time * 0.5f) * 1.5f; // колеблется от 1.0 до 4.0
+    XMVECTOR eye = XMVectorSet(
+        sinf(cameraAngle_) * cameraDistance_,
+        1.0f,
+        cosf(cameraAngle_) * cameraDistance_,
+        1.0f
+    );
     // UV scroll animation
     uvOffsetX_ += 0.5f * deltaTime;  // scroll horizontally
-    uvOffsetY_ += 0.2f * deltaTime;  // scroll vertically (slower)
+    uvOffsetY_ += 0.0f * deltaTime;  // scroll vertically (slower)
     // Wrap to [0, 1) to avoid floating-point drift
     if (uvOffsetX_ > 1.0f) uvOffsetX_ -= 1.0f;
     if (uvOffsetY_ > 1.0f) uvOffsetY_ -= 1.0f;
+    float minDistance = 1.5f;
+    float maxDistance = 4.5f;
+    float blendFactor = 0.0f;
+
+    if (cameraDistance_ <= minDistance)
+        blendFactor = 1.0f;
+    else if (cameraDistance_ >= maxDistance)
+        blendFactor = 0.0f;
+    else
+        blendFactor = 1.0f - (cameraDistance_ - minDistance) / (maxDistance - minDistance);
 
     XMMATRIX world  = XMMatrixRotationY(rotationAngle_)
                     * XMMatrixRotationX(0.3f);
-    XMVECTOR eye    = XMVectorSet(0.0f, 1.0f, -3.0f, 1.0f);
     XMVECTOR target = XMVectorSet(0.0f, 0.0f,  0.0f, 1.0f);
     XMVECTOR up     = XMVectorSet(0.0f, 1.0f,  0.0f, 0.0f);
     XMMATRIX view   = XMMatrixLookAtLH(eye, target, up);
@@ -730,6 +750,7 @@ void Game::Update(float deltaTime)
     cb.CameraPos  = XMFLOAT4(0.0f,  1.0f, -3.0f, 1.0f);
     cb.Tiling     = XMFLOAT2(8.0f,  8.0f);         // tile texture 2x2
     cb.UVOffset   = XMFLOAT2(uvOffsetX_, uvOffsetY_);
+    cb.BlendFactor = blendFactor;
 
     memcpy(cbMapped_, &cb, sizeof(cb));
 }
