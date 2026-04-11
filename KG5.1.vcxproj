@@ -20,16 +20,20 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Game.cpp" />
+    <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="InputDevice.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="ObjLoader.cpp" />
+    <ClCompile Include="RenderingSystem.cpp" />
     <ClCompile Include="TextureLoader.cpp" />
     <ClCompile Include="Window.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Game.h" />
+    <ClInclude Include="GBuffer.h" />
     <ClInclude Include="InputDevice.h" />
     <ClInclude Include="ObjLoader.h" />
+    <ClInclude Include="RenderingSystem.h" />
     <ClInclude Include="TextureLoader.h" />
     <ClInclude Include="Types.h" />
     <ClInclude Include="Utils.h" />
@@ -39,6 +43,10 @@
     <None Include="Shaders.hlsl">
       <FileType>Document</FileType>
     </None>
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="GBufferShaders.hlsl" />
+    <FxCompile Include="LightingShaders.hlsl" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
@@ -135,6 +143,10 @@
     <PostBuildEvent>
       <Command>xcopy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)"</Command>
     </PostBuildEvent>
+    <FxCompile>
+      <ShaderType>Effect</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+    </FxCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>

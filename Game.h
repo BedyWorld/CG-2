@@ -1,128 +1,115 @@
 #pragma once
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <d3dcompiler.h>
-#include <wrl/client.h>
-#include <vector>
+#include <windows.h>
+#include <memory>
 #include <string>
-
-#pragma comment(lib, "d3d12.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3dcompiler.lib")
-#pragma comment(lib, "dxguid.lib")
-
-#include "Types.h"
-#include "TextureLoader.h"
+#include <vector>
+#include "RenderingSystem.h"
 #include "ObjLoader.h"
+#include "TextureLoader.h"
+#include "Types.h"
 
-using Microsoft::WRL::ComPtr;
+// ============================================================
+//  Game — логика сцены, делегирует рендеринг в RenderingSystem.
+//
+//  Реализует двупроходный Deferred Rendering:
+//    1. Geometry Pass  — заполняет GBuffer через RenderingSystem
+//    2. Lighting Pass  — освещение full-screen quad
+//
+//  Источники света управляются через RenderingSystem::AddXxxLight().
+//
+//  Стрельба световыми снарядами (LMB):
+//    - При нажатии ЛКМ из позиции камеры в направлении взгляда
+//      запускается LightBullet.
+//    - Снаряд летит с заданной скоростью и на каждом Update()
+//      проверяется против CPU-сайдкаста по треугольникам меша.
+//    - При попадании снаряд «прилипает» к точке удара и начинает
+//      постоянно светить как точечный источник.
+//    - Максимум MAX_STUCK_LIGHTS прилипших источников хранятся
+//      независимо от лимита динамических источников.
+// ============================================================
 
-static const UINT FRAME_COUNT = 2;
+static const int MAX_BULLETS      = 64;   // снарядов в воздухе одновременно
+static const int MAX_STUCK_LIGHTS  = 8;   // прилипших источников (не больше MAX_LIGHTS - 9)
+static const float BULLET_SPEED    = 12.0f;
+static const float BULLET_MAX_DIST = 200.0f; // максимальная дистанция полёта
 
 class Game
 {
 public:
     Game(HWND hwnd, int width, int height);
-    ~Game();
+    ~Game() = default;
+
+    Game(const Game&) = delete;
+    Game& operator=(const Game&) = delete;
 
     bool Initialize();
     void Update(float deltaTime);
     void Render();
     void Resize(int width, int height);
 
+    void ClearStuckLights();
+    // Вызывается из WndProc при нажатии ЛКМ
+    void OnShoot();
+
+    // Для передачи меша в рейкастер после загрузки
+    void SetMeshForRaycast(const std::vector<Vertex>& verts,
+                           const std::vector<UINT>&   idxs);
+
 private:
-    // ---- Init helpers ----
-    void CreateDevice();
-    void CreateCommandQueue();
-    void CreateSwapChain();
-    void CreateDescriptorHeaps();
-    void CreateRenderTargetViews();
-    void CreateDepthStencilBuffer();
-    void CreateCommandObjects();
-    void CreateFence();
-    void CreateRootSignature();
-    void CreatePSO();
-    void CreateGeometry();
-    void LoadModel(const std::wstring& objPath);
-    void UploadTexture(const TextureData& td, int slot = 0);
-    void CreateConstantBuffer();
+    void LoadSceneGeometry();
+    void LoadSceneTextures();
 
-    // ---- Sync ----
-    void WaitForGPU();
-    void MoveToNextFrame();
+    // ---- CPU рейкаст ----
+    // Возвращает true и записывает hitT (расстояние вдоль луча), если луч
+    // (origin + dir*t) пересекает хотя бы один треугольник меша.
+    bool RaycastMesh(XMFLOAT3 origin, XMFLOAT3 dir,
+                     float maxDist, float& outT) const;
 
-    // ---- Render ----
-    void PopulateCommandList();
+    // Пересечение луча с треугольником (алгоритм Мёллера–Трумбора).
+    static bool RayTriangle(XMFLOAT3 orig, XMFLOAT3 dir,
+                             XMFLOAT3 v0, XMFLOAT3 v1, XMFLOAT3 v2,
+                             float& t);
 
-    // ---- Geometry helpers ----
-    std::vector<Vertex> GenerateCube();
-    std::vector<UINT>   GenerateCubeIndices();
-    void BuildBuffers(const std::vector<Vertex>& verts,
-                      const std::vector<UINT>&   idxs);
-    void MakeUploadBuffer(const void* data, UINT64 byteSize,
-                          ComPtr<ID3D12Resource>& buf);
+    // Обновляет полёт снарядов, возможно переводит их в Stuck.
+    void UpdateBullets(float dt);
 
-    ComPtr<ID3DBlob> CompileShader(const std::wstring& filename,
-                                   const std::string& entry,
-                                   const std::string& target);
-
-    // Window
     HWND hwnd_;
     int  width_;
     int  height_;
 
-    // Animation
+    std::unique_ptr<RenderingSystem> rs_;
+
+    // ---- Меш для CPU рейкаста ----
+    std::vector<Vertex> meshVerts_;
+    std::vector<UINT>   meshIdxs_;
+
+    // ---- Снаряды ----
+    std::vector<LightBullet> bullets_;
+
+    // ---- Прилипшие источники ----
+    struct StuckLight
+    {
+        XMFLOAT3 Position;
+        XMFLOAT3 Color;
+        float    Intensity;
+        float    Range;
+    };
+    std::vector<StuckLight> stuckLights_;
+
+    // ---- Состояние кнопки мыши (защита от удержания) ----
+    bool prevLMB_ = false;
+
+    // ---- Анимация ----
     float rotationAngle_ = 0.0f;
-    float uvOffsetX_     = 0.0f;
-    float uvOffsetY_     = 0.0f;
+    float uvOffsetX_ = 0.0f;
+    float time_ = 0.0f;
+    float cameraDistance_ = 3.0f;
+    float cameraAngle_ = 0.0f;
 
-    //cam
-    float cameraDistance_ = 3.0f;  // начальное расстояние
-    float cameraAngle_ = 0.0f;      // угол вокруг модели
+    // ---- Текущая позиция и направление камеры (обновляется в Update) ----
+    XMFLOAT3 camPos_    = {};
+    XMFLOAT3 camForward_= {0,0,1};
 
-    // D3D12 core
-    ComPtr<ID3D12Device>              device_;
-    ComPtr<ID3D12CommandQueue>        commandQueue_;
-    ComPtr<IDXGISwapChain3>           swapChain_;
-
-    // Descriptor heaps
-    ComPtr<ID3D12DescriptorHeap>      rtvHeap_;
-    ComPtr<ID3D12DescriptorHeap>      dsvHeap_;
-    ComPtr<ID3D12DescriptorHeap>      srvHeap_;   // shader-visible, for texture
-    UINT                              rtvDescSize_ = 0;
-
-    // Render targets + depth
-    ComPtr<ID3D12Resource>            renderTargets_[FRAME_COUNT];
-    ComPtr<ID3D12Resource>            depthStencil_;
-
-    // Command objects
-    ComPtr<ID3D12CommandAllocator>    commandAllocators_[FRAME_COUNT];
-    ComPtr<ID3D12GraphicsCommandList> commandList_;
-
-    // Pipeline
-    ComPtr<ID3D12RootSignature>       rootSignature_;
-    ComPtr<ID3D12PipelineState>       pso_;
-
-    // Geometry
-    ComPtr<ID3D12Resource>            vertexBuffer_;
-    ComPtr<ID3D12Resource>            indexBuffer_;
-    D3D12_VERTEX_BUFFER_VIEW          vbView_ = {};
-    D3D12_INDEX_BUFFER_VIEW           ibView_ = {};
-    UINT                              indexCount_ = 0;
-
-    // Textures  (slot 0 = A, slot 1 = B)
-    ComPtr<ID3D12Resource>            texture_;
-    ComPtr<ID3D12Resource>            textureUpload_;
-    ComPtr<ID3D12Resource>            texture2_;
-    ComPtr<ID3D12Resource>            textureUpload2_;
-
-    // Constant buffer (persistently mapped)
-    ComPtr<ID3D12Resource>            constantBuffer_;
-    ConstantBufferData*               cbMapped_ = nullptr;
-
-    // Fence
-    ComPtr<ID3D12Fence>               fence_;
-    UINT64                            fenceValues_[FRAME_COUNT] = {};
-    HANDLE                            fenceEvent_ = nullptr;
-    UINT                              frameIndex_ = 0;
+    // ---- Мировая матрица сцены (для трансформации рейкаста) ----
+    XMMATRIX worldMatrix_ = {};
 };

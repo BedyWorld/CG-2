@@ -33,6 +33,12 @@
     <ClCompile Include="Game.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="RenderingSystem.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
+    <ClCompile Include="GBuffer.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="InputDevice.h">
@@ -56,10 +62,24 @@
     <ClInclude Include="Game.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
+    <ClInclude Include="RenderingSystem.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="GBuffer.h">
+      <Filter>Исходные файлы</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="Shaders.hlsl">
       <Filter>Исходные файлы</Filter>
     </None>
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="GBufferShaders.hlsl">
+      <Filter>Исходные файлы</Filter>
+    </FxCompile>
+    <FxCompile Include="LightingShaders.hlsl">
+      <Filter>Исходные файлы</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>

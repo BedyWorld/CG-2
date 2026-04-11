@@ -1,892 +1,456 @@
 #include "Game.h"
 #include "Utils.h"
-#include <cassert>
+#include <cmath>
+#include <algorithm>
+#include <limits>
+
+static constexpr float PI = 3.14159265f;
 
 // ============================================================
-//  Constructor / Destructor
+//  Вспомогательные inline-функции
 // ============================================================
+static inline XMFLOAT3 F3Add(XMFLOAT3 a, XMFLOAT3 b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
+static inline XMFLOAT3 F3Sub(XMFLOAT3 a, XMFLOAT3 b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
+static inline XMFLOAT3 F3Scale(XMFLOAT3 a, float s)  { return {a.x*s, a.y*s, a.z*s}; }
+static inline float    F3Dot(XMFLOAT3 a, XMFLOAT3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+static inline XMFLOAT3 F3Cross(XMFLOAT3 a, XMFLOAT3 b)
+{
+    return { a.y*b.z - a.z*b.y,
+             a.z*b.x - a.x*b.z,
+             a.x*b.y - a.y*b.x };
+}
+static inline float F3Len(XMFLOAT3 a) { return sqrtf(F3Dot(a,a)); }
+static inline XMFLOAT3 F3Norm(XMFLOAT3 a)
+{
+    float l = F3Len(a);
+    if (l < 1e-6f) return {0,0,1};
+    return F3Scale(a, 1.f/l);
+}
+
+// Применяет матрицу World к точке (float3 → float3)
+static inline XMFLOAT3 TransformPoint(XMFLOAT3 p, XMMATRIX m)
+{
+    XMVECTOR v = XMVector3TransformCoord(XMLoadFloat3(&p), m);
+    XMFLOAT3 out;
+    XMStoreFloat3(&out, v);
+    return out;
+}
+
+// ============================================================
+
 Game::Game(HWND hwnd, int width, int height)
     : hwnd_(hwnd), width_(width), height_(height)
 {
-    for (UINT i = 0; i < FRAME_COUNT; ++i)
-        fenceValues_[i] = 0;
+    rs_ = std::make_unique<RenderingSystem>(hwnd, width, height);
+    worldMatrix_ = XMMatrixIdentity();
 }
 
-Game::~Game()
-{
-    // БАГ #1 ИСПРАВЛЕН: проверяем что все объекты синхронизации созданы,
-    // прежде чем вызывать WaitForGPU(). Если Initialize() упал на полпути,
-    // любой из них может быть nullptr — вызов через nullptr = краш в ntdll.
-    if (commandQueue_ && fence_ && fenceEvent_)
-    {
-        try { WaitForGPU(); }
-        catch (...) {} // деструктор никогда не должен бросать исключения
-    }
-
-    if (constantBuffer_ && cbMapped_)
-        constantBuffer_->Unmap(0, nullptr);
-
-    if (fenceEvent_)
-        CloseHandle(fenceEvent_);
-}
-
-// ============================================================
-//  Initialize
-// ============================================================
 bool Game::Initialize()
 {
     try
     {
-        CreateDevice();
-        CreateCommandQueue();
-        CreateSwapChain();
-        CreateDescriptorHeaps();
-        CreateRenderTargetViews();
-        CreateDepthStencilBuffer();
-        CreateCommandObjects();
-        CreateFence();
-        CreateRootSignature();
-        CreatePSO();
-
-        // ---- Open command list for geometry + texture uploads ----
-        ThrowIfFailed(commandAllocators_[0]->Reset());
-        ThrowIfFailed(commandList_->Reset(commandAllocators_[0].Get(), nullptr));
-
-        // Try to load OBJ from exe directory, fall back to generated cube
-        {
-            wchar_t exePath[MAX_PATH] = {};
-            GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-            std::wstring dir(exePath);
-            dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
-
-            ObjResult obj = LoadObj(dir + L"Oleg.obj");
-            if (obj.valid)
-                BuildBuffers(obj.vertices, obj.indices);
-            else
-                CreateGeometry();
-
-            // ---- Текстура A (слот 0) ----
-            TextureData td1 = LoadTextureWIC(dir + L"texture1.png");
-            if (!td1.valid) td1 = LoadTextureWIC(dir + L"texture1.jpg");
-            if (!td1.valid)
-            {
-                MessageBoxW(hwnd_,
-                    (L"Не найден файл текстуры!\n\nОжидается:\n" + dir + L"texture1.png  (или .jpg)\n\n"
-                     L"Скопируйте оба файла текстур рядом с .exe").c_str(),
-                    L"Texture Not Found", MB_OK | MB_ICONERROR);
-                ThrowIfFailed(E_FAIL, "texture1.png/.jpg not found next to .exe");
-            }
-            UploadTexture(td1, 0);
-
-            // ---- Текстура B (слот 1) ----
-            TextureData td2 = LoadTextureWIC(dir + L"texture2.png");
-            if (!td2.valid) td2 = LoadTextureWIC(dir + L"texture2.jpg");
-            if (!td2.valid)
-            {
-                MessageBoxW(hwnd_,
-                    (L"Не найден файл текстуры!\n\nОжидается:\n" + dir + L"texture2.png  (или .jpg)\n\n"
-                     L"Скопируйте оба файла текстур рядом с .exe").c_str(),
-                    L"Texture Not Found", MB_OK | MB_ICONERROR);
-                ThrowIfFailed(E_FAIL, "texture2.png/.jpg not found next to .exe");
-            }
-            UploadTexture(td2, 1);
-        }
-
-        // ---- Execute upload commands and wait ----
-        ThrowIfFailed(commandList_->Close());
-        ID3D12CommandList* lists[] = { commandList_.Get() };
-        commandQueue_->ExecuteCommandLists(1, lists);
-        WaitForGPU();
-
-        // Safe to release both upload buffers now that GPU is done
-        textureUpload_.Reset();
-        textureUpload2_.Reset();
-
-        CreateConstantBuffer();
+        rs_->Initialize();
+        rs_->BeginResourceUpload();
+        LoadSceneGeometry();
+        LoadSceneTextures();
+        rs_->EndResourceUpload();
+        rs_->ReleaseTextureUploadBuffers();
+        rs_->CreateConstantBuffers();
+        return true;
     }
-    catch (const std::exception& e)
+    catch (...)
     {
-        MessageBoxA(hwnd_, e.what(), "D3D12 Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(hwnd_, L"Initialize failed", L"Error", MB_OK | MB_ICONERROR);
         return false;
     }
-    return true;
 }
-
-// ============================================================
-//  1. Device
-// ============================================================
-void Game::CreateDevice()
+void Game::ClearStuckLights()
 {
-#ifdef _DEBUG
-    ComPtr<ID3D12Debug> debug;
-    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
-        debug->EnableDebugLayer();
-#endif
+    stuckLights_.clear();
 
-    ComPtr<IDXGIFactory6> factory;
-    ThrowIfFailed(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
-
-    ComPtr<IDXGIAdapter1> adapter;
-    for (UINT i = 0;
-        factory->EnumAdapterByGpuPreference(
-            i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-            IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND;
-        ++i)
+    // Также деактивируем все летящие снаряды
+    for (auto& b : bullets_)
     {
-        HRESULT hr = D3D12CreateDevice(adapter.Get(),
-            D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_));
-        if (SUCCEEDED(hr)) return;
-    }
-    ThrowIfFailed(E_FAIL, "No D3D12 device found");
-}
-
-// ============================================================
-//  2. Command Queue
-// ============================================================
-void Game::CreateCommandQueue()
-{
-    D3D12_COMMAND_QUEUE_DESC desc = {};
-    desc.Type  = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    ThrowIfFailed(device_->CreateCommandQueue(&desc, IID_PPV_ARGS(&commandQueue_)));
-}
-
-// ============================================================
-//  3. SwapChain
-// ============================================================
-void Game::CreateSwapChain()
-{
-    ComPtr<IDXGIFactory4> factory;
-    ThrowIfFailed(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
-
-    DXGI_SWAP_CHAIN_DESC1 desc = {};
-    desc.BufferCount  = FRAME_COUNT;
-    desc.Width        = static_cast<UINT>(width_);
-    desc.Height       = static_cast<UINT>(height_);
-    desc.Format       = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.BufferUsage  = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.SwapEffect   = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    desc.SampleDesc   = { 1, 0 };
-
-    ComPtr<IDXGISwapChain1> sc1;
-    ThrowIfFailed(factory->CreateSwapChainForHwnd(
-        commandQueue_.Get(), hwnd_, &desc, nullptr, nullptr, &sc1));
-    factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
-    ThrowIfFailed(sc1.As(&swapChain_));
-    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
-}
-
-// ============================================================
-//  4. Descriptor Heaps  (RTV + DSV + SRV)
-// ============================================================
-void Game::CreateDescriptorHeaps()
-{
-    // RTV
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC d = {};
-        d.NumDescriptors = FRAME_COUNT;
-        d.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        ThrowIfFailed(device_->CreateDescriptorHeap(&d, IID_PPV_ARGS(&rtvHeap_)));
-        rtvDescSize_ = device_->GetDescriptorHandleIncrementSize(
-            D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    }
-    // DSV
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC d = {};
-        d.NumDescriptors = 1;
-        d.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        ThrowIfFailed(device_->CreateDescriptorHeap(&d, IID_PPV_ARGS(&dsvHeap_)));
-    }
-    // SRV (shader-visible — 2 слота: текстура A (t0) и текстура B (t1))
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC d = {};
-        d.NumDescriptors = 2;   // ← два SRV для двух текстур
-        d.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        d.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        ThrowIfFailed(device_->CreateDescriptorHeap(&d, IID_PPV_ARGS(&srvHeap_)));
-    }
-}
-
-// ============================================================
-//  5. Render Target Views
-// ============================================================
-void Game::CreateRenderTargetViews()
-{
-    D3D12_CPU_DESCRIPTOR_HANDLE handle =
-        rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-
-    for (UINT i = 0; i < FRAME_COUNT; ++i)
-    {
-        ThrowIfFailed(swapChain_->GetBuffer(i, IID_PPV_ARGS(&renderTargets_[i])));
-        device_->CreateRenderTargetView(renderTargets_[i].Get(), nullptr, handle);
-        handle.ptr += rtvDescSize_;
-    }
-}
-
-// ============================================================
-//  6. Depth-Stencil
-// ============================================================
-void Game::CreateDepthStencilBuffer()
-{
-    D3D12_HEAP_PROPERTIES hp = {};
-    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    desc.Width            = static_cast<UINT>(width_);
-    desc.Height           = static_cast<UINT>(height_);
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels        = 1;
-    desc.Format           = DXGI_FORMAT_D32_FLOAT;
-    desc.SampleDesc       = { 1, 0 };
-    desc.Flags            = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-    D3D12_CLEAR_VALUE clear = {};
-    clear.Format                = DXGI_FORMAT_D32_FLOAT;
-    clear.DepthStencil.Depth    = 1.0f;
-
-    ThrowIfFailed(device_->CreateCommittedResource(
-        &hp, D3D12_HEAP_FLAG_NONE,
-        &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
-        &clear, IID_PPV_ARGS(&depthStencil_)));
-
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
-    dsvDesc.Format        = DXGI_FORMAT_D32_FLOAT;
-    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    device_->CreateDepthStencilView(depthStencil_.Get(),
-        &dsvDesc, dsvHeap_->GetCPUDescriptorHandleForHeapStart());
-}
-
-// ============================================================
-//  7. Command Allocators + Command List
-// ============================================================
-void Game::CreateCommandObjects()
-{
-    for (UINT i = 0; i < FRAME_COUNT; ++i)
-        ThrowIfFailed(device_->CreateCommandAllocator(
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            IID_PPV_ARGS(&commandAllocators_[i])));
-
-    ThrowIfFailed(device_->CreateCommandList(
-        0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        commandAllocators_[0].Get(), nullptr,
-        IID_PPV_ARGS(&commandList_)));
-
-    commandList_->Close(); // will be Reset before use
-}
-
-// ============================================================
-//  8. Fence
-// ============================================================
-void Game::CreateFence()
-{
-    ThrowIfFailed(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE,
-        IID_PPV_ARGS(&fence_)));
-    fenceValues_[0] = 1;
-    fenceValues_[1] = 1;
-    fenceEvent_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    if (!fenceEvent_)
-        ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
-}
-
-// ============================================================
-//  9. Root Signature  (CBV at b0 + SRV table at t0 + static sampler s0)
-// ============================================================
-void Game::CreateRootSignature()
-{
-    // param[0]: CBV inline descriptor (constant buffer)
-    D3D12_ROOT_PARAMETER params[2] = {};  // всё ещё 2 параметра, но CBV теперь содержит BlendFactor
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[0].Descriptor.RegisterSpace = 0;
-    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // param[1]: descriptor table с 2 SRV (текстуры)
-    D3D12_DESCRIPTOR_RANGE srvRange = {};
-    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors = 2;
-    srvRange.BaseShaderRegister = 0;
-    srvRange.RegisterSpace = 0;
-    srvRange.OffsetInDescriptorsFromTableStart = 0;
-
-    params[1].ParameterType                          = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[1].DescriptorTable.NumDescriptorRanges    = 1;
-    params[1].DescriptorTable.pDescriptorRanges      = &srvRange;
-    params[1].ShaderVisibility                       = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    // Static sampler (wrap + linear filter)
-    D3D12_STATIC_SAMPLER_DESC sampler = {};
-    sampler.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampler.MaxLOD           = D3D12_FLOAT32_MAX;
-    sampler.ShaderRegister   = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_ROOT_SIGNATURE_DESC desc = {};
-    desc.NumParameters     = 2;
-    desc.pParameters       = params;
-    desc.NumStaticSamplers = 1;
-    desc.pStaticSamplers   = &sampler;
-    desc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-    ComPtr<ID3DBlob> sig, err;
-    ThrowIfFailed(D3D12SerializeRootSignature(&desc,
-        D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
-    ThrowIfFailed(device_->CreateRootSignature(
-        0, sig->GetBufferPointer(), sig->GetBufferSize(),
-        IID_PPV_ARGS(&rootSignature_)));
-}
-
-// ============================================================
-//  10. PSO
-// ============================================================
-ComPtr<ID3DBlob> Game::CompileShader(const std::wstring& filename,
-    const std::string& entry, const std::string& target)
-{
-    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#ifdef _DEBUG
-    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#else
-    flags |= D3DCOMPILE_OPTIMIZATION_LEVEL3;
-#endif
-    // БАГ #2 ИСПРАВЛЕН: D3DCompileFromFile возвращает E_FAIL (не HRESULT с кодом)
-    // если файл не найден, и errors может быть nullptr — нужна явная проверка
-    // существования файла, иначе пользователь не поймёт в чём проблема.
-    if (GetFileAttributesW(filename.c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        std::string msg = "Shader file not found!\nExpected path:\n";
-        // конвертируем wstring -> string для MessageBoxA
-        int len = WideCharToMultiByte(CP_UTF8, 0, filename.c_str(), -1,
-                                      nullptr, 0, nullptr, nullptr);
-        std::string narrow(len, 0);
-        WideCharToMultiByte(CP_UTF8, 0, filename.c_str(), -1,
-                            &narrow[0], len, nullptr, nullptr);
-        msg += narrow;
-        msg += "\n\nСкопируйте Shaders.hlsl рядом с .exe файлом.";
-        MessageBoxA(hwnd_, msg.c_str(), "Shader Not Found", MB_OK | MB_ICONERROR);
-        ThrowIfFailed(E_FAIL, "Shaders.hlsl not found next to .exe");
+        if (b.Active)
+            b.Active = false;
     }
 
-    ComPtr<ID3DBlob> blob, errors;
-    HRESULT hr = D3DCompileFromFile(
-        filename.c_str(), nullptr, nullptr,
-        entry.c_str(), target.c_str(), flags, 0, &blob, &errors);
-
-    if (FAILED(hr))
-    {
-        if (errors)
-            MessageBoxA(hwnd_,
-                static_cast<char*>(errors->GetBufferPointer()),
-                "Shader Compile Error", MB_OK | MB_ICONERROR);
-        ThrowIfFailed(hr, "CompileShader failed");
-    }
-    return blob;
+    // Удаляем неактивные снаряды
+    bullets_.erase(
+        std::remove_if(bullets_.begin(), bullets_.end(),
+            [](const LightBullet& b) { return !b.Active && !b.Stuck; }),
+        bullets_.end());
+}
+void Game::SetMeshForRaycast(const std::vector<Vertex>& verts, const std::vector<UINT>& idxs)
+{
+    meshVerts_ = verts;
+    meshIdxs_  = idxs;
 }
 
-void Game::CreatePSO()
+void Game::LoadSceneGeometry()
 {
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    std::wstring path(exePath);
-    path = path.substr(0, path.find_last_of(L"\\/") + 1) + L"Shaders.hlsl";
+    std::wstring dir(exePath);
+    dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
 
-    auto vs = CompileShader(path, "VSMain", "vs_5_0");
-    auto ps = CompileShader(path, "PSMain", "ps_5_0");
-
-    // Input layout now includes TEXCOORD
-    D3D12_INPUT_ELEMENT_DESC layout[] =
+    ObjResult obj = LoadObj(dir + L"sponza.obj");
+    if (obj.valid)
     {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0,
-          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12,
-          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT,  0, 24,
-          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,        0, 40,
-          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-    };
-
-    D3D12_RASTERIZER_DESC raster = {};
-    raster.FillMode        = D3D12_FILL_MODE_SOLID;
-    raster.CullMode        = D3D12_CULL_MODE_BACK;
-    raster.DepthClipEnable = TRUE;
-
-    D3D12_DEPTH_STENCIL_DESC ds = {};
-    ds.DepthEnable    = TRUE;
-    ds.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    ds.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
-
-    D3D12_BLEND_DESC blend = {};
-    blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-    psoDesc.InputLayout           = { layout, _countof(layout) };
-    psoDesc.pRootSignature        = rootSignature_.Get();
-    psoDesc.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
-    psoDesc.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
-    psoDesc.RasterizerState       = raster;
-    psoDesc.BlendState            = blend;
-    psoDesc.DepthStencilState     = ds;
-    psoDesc.SampleMask            = UINT_MAX;
-    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    psoDesc.NumRenderTargets      = 1;
-    psoDesc.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
-    psoDesc.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
-    psoDesc.SampleDesc            = { 1, 0 };
-
-    ThrowIfFailed(device_->CreateGraphicsPipelineState(
-        &psoDesc, IID_PPV_ARGS(&pso_)));
-}
-
-// ============================================================
-//  11. Geometry helpers
-// ============================================================
-void Game::MakeUploadBuffer(const void* data, UINT64 byteSize,
-                             ComPtr<ID3D12Resource>& buf)
-{
-    D3D12_HEAP_PROPERTIES hp = {};
-    hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-
-    D3D12_RESOURCE_DESC rd = {};
-    rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width            = byteSize;
-    rd.Height           = 1;
-    rd.DepthOrArraySize = 1;
-    rd.MipLevels        = 1;
-    rd.SampleDesc       = { 1, 0 };
-    rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-    ThrowIfFailed(device_->CreateCommittedResource(
-        &hp, D3D12_HEAP_FLAG_NONE, &rd,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-        IID_PPV_ARGS(&buf)));
-
-    void* mapped = nullptr;
-    D3D12_RANGE range = { 0, 0 };
-    buf->Map(0, &range, &mapped);
-    memcpy(mapped, data, static_cast<size_t>(byteSize));
-    buf->Unmap(0, nullptr);
-}
-
-void Game::BuildBuffers(const std::vector<Vertex>& verts,
-                         const std::vector<UINT>&   idxs)
-{
-    indexCount_ = static_cast<UINT>(idxs.size());
-
-    UINT64 vbSize = verts.size() * sizeof(Vertex);
-    UINT64 ibSize = idxs.size()  * sizeof(UINT);
-
-    MakeUploadBuffer(verts.data(), vbSize, vertexBuffer_);
-    MakeUploadBuffer(idxs.data(),  ibSize, indexBuffer_);
-
-    vbView_.BufferLocation = vertexBuffer_->GetGPUVirtualAddress();
-    vbView_.SizeInBytes    = static_cast<UINT>(vbSize);
-    vbView_.StrideInBytes  = sizeof(Vertex);
-
-    ibView_.BufferLocation = indexBuffer_->GetGPUVirtualAddress();
-    ibView_.SizeInBytes    = static_cast<UINT>(ibSize);
-    ibView_.Format         = DXGI_FORMAT_R32_UINT;
-}
-
-std::vector<Vertex> Game::GenerateCube()
-{
-    float s = 0.5f;
-    // UV coordinates: each face gets its own 0-1 UV square
-    Vertex vData[] =
-    {
-        // Front (+Z) red
-        { {-s,-s, s}, {0,0,1}, {0.9f,0.2f,0.2f,1}, {0,1} },
-        { { s,-s, s}, {0,0,1}, {0.9f,0.2f,0.2f,1}, {1,1} },
-        { { s, s, s}, {0,0,1}, {0.9f,0.2f,0.2f,1}, {1,0} },
-        { {-s, s, s}, {0,0,1}, {0.9f,0.2f,0.2f,1}, {0,0} },
-        // Back (-Z) green
-        { { s,-s,-s}, {0,0,-1}, {0.2f,0.8f,0.2f,1}, {0,1} },
-        { {-s,-s,-s}, {0,0,-1}, {0.2f,0.8f,0.2f,1}, {1,1} },
-        { {-s, s,-s}, {0,0,-1}, {0.2f,0.8f,0.2f,1}, {1,0} },
-        { { s, s,-s}, {0,0,-1}, {0.2f,0.8f,0.2f,1}, {0,0} },
-        // Left (-X) blue
-        { {-s,-s,-s}, {-1,0,0}, {0.2f,0.2f,0.9f,1}, {0,1} },
-        { {-s,-s, s}, {-1,0,0}, {0.2f,0.2f,0.9f,1}, {1,1} },
-        { {-s, s, s}, {-1,0,0}, {0.2f,0.2f,0.9f,1}, {1,0} },
-        { {-s, s,-s}, {-1,0,0}, {0.2f,0.2f,0.9f,1}, {0,0} },
-        // Right (+X) yellow
-        { { s,-s, s}, {1,0,0}, {0.9f,0.9f,0.1f,1}, {0,1} },
-        { { s,-s,-s}, {1,0,0}, {0.9f,0.9f,0.1f,1}, {1,1} },
-        { { s, s,-s}, {1,0,0}, {0.9f,0.9f,0.1f,1}, {1,0} },
-        { { s, s, s}, {1,0,0}, {0.9f,0.9f,0.1f,1}, {0,0} },
-        // Top (+Y) cyan
-        { {-s, s, s}, {0,1,0}, {0.1f,0.9f,0.9f,1}, {0,1} },
-        { { s, s, s}, {0,1,0}, {0.1f,0.9f,0.9f,1}, {1,1} },
-        { { s, s,-s}, {0,1,0}, {0.1f,0.9f,0.9f,1}, {1,0} },
-        { {-s, s,-s}, {0,1,0}, {0.1f,0.9f,0.9f,1}, {0,0} },
-        // Bottom (-Y) magenta
-        { {-s,-s,-s}, {0,-1,0}, {0.9f,0.1f,0.9f,1}, {0,1} },
-        { { s,-s,-s}, {0,-1,0}, {0.9f,0.1f,0.9f,1}, {1,1} },
-        { { s,-s, s}, {0,-1,0}, {0.9f,0.1f,0.9f,1}, {1,0} },
-        { {-s,-s, s}, {0,-1,0}, {0.9f,0.1f,0.9f,1}, {0,0} },
-    };
-    return std::vector<Vertex>(vData, vData + _countof(vData));
-}
-
-std::vector<UINT> Game::GenerateCubeIndices()
-{
-    std::vector<UINT> idx;
-    for (UINT f = 0; f < 6; ++f)
-    {
-        UINT b = f * 4;
-        idx.push_back(b+0); idx.push_back(b+1); idx.push_back(b+2);
-        idx.push_back(b+0); idx.push_back(b+2); idx.push_back(b+3);
+        rs_->BuildBuffers(obj.vertices, obj.indices);
+        SetMeshForRaycast(obj.vertices, obj.indices);
+        return;
     }
-    return idx;
-}
 
-void Game::CreateGeometry()
-{
-    auto verts = GenerateCube();
-    auto idxs  = GenerateCubeIndices();
-    BuildBuffers(verts, idxs);
-}
-
-void Game::LoadModel(const std::wstring& objPath)
-{
-    ObjResult obj = LoadObj(objPath);
-    if (!obj.valid) { CreateGeometry(); return; }
-    BuildBuffers(obj.vertices, obj.indices);
-}
-
-// ============================================================
-//  12. Texture Upload (requires open command list)
-//      slot 0 = gTexture (t0), slot 1 = gTexture2 (t1)
-// ============================================================
-void Game::UploadTexture(const TextureData& td, int slot)
-{
-    // Защита: если TextureData невалидна — текстура не загружена с диска.
-    // Автогенерация текстур отключена: программа должна получить реальные файлы.
-    if (!td.valid || td.width == 0 || td.height == 0)
-        ThrowIfFailed(E_INVALIDARG,
-            "UploadTexture: TextureData is invalid (width/height == 0). "
-            "Texture file was not loaded from disk.");
-
-    // Выбираем нужные ComPtr-члены в зависимости от слота
-    ComPtr<ID3D12Resource>& texRes    = (slot == 0) ? texture_       : texture2_;
-    ComPtr<ID3D12Resource>& uploadRes = (slot == 0) ? textureUpload_ : textureUpload2_;
-
-    // --- Create default-heap texture resource (COPY_DEST) ---
-    D3D12_HEAP_PROPERTIES defaultHeap = {};
-    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    D3D12_RESOURCE_DESC texDesc = {};
-    texDesc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texDesc.Width            = td.width;
-    texDesc.Height           = td.height;
-    texDesc.DepthOrArraySize = 1;
-    texDesc.MipLevels        = 1;
-    texDesc.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
-    texDesc.SampleDesc       = { 1, 0 };
-
-    ThrowIfFailed(device_->CreateCommittedResource(
-        &defaultHeap, D3D12_HEAP_FLAG_NONE,
-        &texDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-        IID_PPV_ARGS(&texRes)));
-
-    // --- Figure out upload buffer size ---
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
-    UINT   numRows = 0;
-    UINT64 rowSize = 0, uploadSize = 0;
-    device_->GetCopyableFootprints(
-        &texDesc, 0, 1, 0, &footprint, &numRows, &rowSize, &uploadSize);
-
-    // --- Create upload heap buffer ---
-    D3D12_HEAP_PROPERTIES uploadHeap = {};
-    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
-
-    D3D12_RESOURCE_DESC bufDesc = {};
-    bufDesc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bufDesc.Width            = uploadSize;
-    bufDesc.Height           = 1;
-    bufDesc.DepthOrArraySize = 1;
-    bufDesc.MipLevels        = 1;
-    bufDesc.SampleDesc       = { 1, 0 };
-    bufDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-    ThrowIfFailed(device_->CreateCommittedResource(
-        &uploadHeap, D3D12_HEAP_FLAG_NONE,
-        &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-        IID_PPV_ARGS(&uploadRes)));
-
-    // --- Copy pixel rows into upload buffer ---
-    uint8_t* mapped = nullptr;
-    uploadRes->Map(0, nullptr, reinterpret_cast<void**>(&mapped));
-    UINT srcRowPitch = td.width * 4; // 4 bytes per RGBA pixel
-    for (UINT row = 0; row < td.height; ++row)
+    // Fallback: куб
+    std::vector<Vertex> verts;
+    std::vector<UINT>   idxs;
+    auto addFace = [&](XMFLOAT3 p0, XMFLOAT3 p1, XMFLOAT3 p2, XMFLOAT3 p3, XMFLOAT3 n)
     {
-        memcpy(mapped + (UINT64)footprint.Footprint.RowPitch * row,
-               td.pixels.data() + (UINT64)srcRowPitch * row,
-               srcRowPitch);
-    }
-    uploadRes->Unmap(0, nullptr);
-
-    // --- Record CopyTextureRegion into open command list ---
-    D3D12_TEXTURE_COPY_LOCATION src = {};
-    src.pResource       = uploadRes.Get();
-    src.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint = footprint;
-
-    D3D12_TEXTURE_COPY_LOCATION dst = {};
-    dst.pResource        = texRes.Get();
-    dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.SubresourceIndex = 0;
-
-    commandList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-    // --- Transition texture: COPY_DEST -> PIXEL_SHADER_RESOURCE ---
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource   = texRes.Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    commandList_->ResourceBarrier(1, &barrier);
-
-    // --- Create SRV в нужном слоте heap'а ---
-    UINT srvDescSize = device_->GetDescriptorHandleIncrementSize(
-        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle =
-        srvHeap_->GetCPUDescriptorHandleForHeapStart();
-    srvHandle.ptr += slot * srvDescSize;   // слот 0 или 1
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels     = 1;
-    device_->CreateShaderResourceView(texRes.Get(), &srvDesc, srvHandle);
+        UINT base = static_cast<UINT>(verts.size());
+        verts.push_back({ p0, n, {1,1,1,1}, {0,0} });
+        verts.push_back({ p1, n, {1,1,1,1}, {1,0} });
+        verts.push_back({ p2, n, {1,1,1,1}, {1,1} });
+        verts.push_back({ p3, n, {1,1,1,1}, {0,1} });
+        idxs.insert(idxs.end(), { base,base+1,base+2, base,base+2,base+3 });
+    };
+    addFace({ -1,-1,-1 }, { 1,-1,-1 }, { 1,1,-1 }, { -1,1,-1 }, { 0,0,-1 });
+    addFace({ -1,-1, 1 }, { 1,-1, 1 }, { 1,1, 1 }, { -1,1, 1 }, { 0,0, 1 });
+    addFace({ -1,-1,-1 }, { -1,-1,1 }, { -1,1,1 }, { -1,1,-1 }, { -1,0,0 });
+    addFace({  1,-1,-1 }, {  1,-1,1 }, {  1,1,1 }, {  1,1,-1 }, {  1,0,0 });
+    addFace({ -1,-1,-1 }, {  1,-1,-1 }, { 1,-1,1 }, { -1,-1,1 }, { 0,-1,0 });
+    addFace({ -1, 1,-1 }, {  1, 1,-1 }, { 1, 1,1 }, { -1, 1,1 }, { 0, 1,0 });
+    rs_->BuildBuffers(verts, idxs);
+    SetMeshForRaycast(verts, idxs);
 }
 
-// ============================================================
-//  13. Constant Buffer (persistently mapped)
-// ============================================================
-void Game::CreateConstantBuffer()
+void Game::LoadSceneTextures()
 {
-    UINT64 cbSize = sizeof(ConstantBufferData); // == 256
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring dir(exePath);
+    dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
 
-    D3D12_HEAP_PROPERTIES hp = {};
-    hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    TextureData td1 = LoadTextureWIC(dir + L"texture1.png");
+    if (!td1.valid) td1 = LoadTextureWIC(dir + L"texture1.jpg");
+    if (!td1.valid)
+    {
+        MessageBoxW(hwnd_,
+            (L"Не найден файл текстуры!\nОжидается:\n" + dir + L"texture1.png").c_str(),
+            L"Texture Not Found", MB_OK | MB_ICONERROR);
+        ThrowIfFailed(E_FAIL, "texture1 not found");
+    }
+    rs_->UploadTexture(td1, 0);
 
-    D3D12_RESOURCE_DESC rd = {};
-    rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width            = cbSize;
-    rd.Height           = 1;
-    rd.DepthOrArraySize = 1;
-    rd.MipLevels        = 1;
-    rd.SampleDesc       = { 1, 0 };
-    rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-    ThrowIfFailed(device_->CreateCommittedResource(
-        &hp, D3D12_HEAP_FLAG_NONE, &rd,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-        IID_PPV_ARGS(&constantBuffer_)));
-
-    D3D12_RANGE range = { 0, 0 };
-    constantBuffer_->Map(0, &range,
-        reinterpret_cast<void**>(&cbMapped_));
+    TextureData td2 = LoadTextureWIC(dir + L"texture2.png");
+    if (!td2.valid) td2 = LoadTextureWIC(dir + L"texture2.jpg");
+    if (!td2.valid)
+    {
+        MessageBoxW(hwnd_,
+            (L"Не найден файл текстуры!\nОжидается:\n" + dir + L"texture2.png").c_str(),
+            L"Texture Not Found", MB_OK | MB_ICONERROR);
+        ThrowIfFailed(E_FAIL, "texture2 not found");
+    }
+    rs_->UploadTexture(td2, 1);
 }
 
 // ============================================================
-//  Update  (rotation + UV animation)
+//  Рейкаст Мёллера–Трумбора (против одного треугольника)
+// ============================================================
+bool Game::RayTriangle(XMFLOAT3 orig, XMFLOAT3 dir,
+                        XMFLOAT3 v0, XMFLOAT3 v1, XMFLOAT3 v2,
+                        float& t)
+{
+    const float EPS = 1e-7f;
+    XMFLOAT3 e1 = F3Sub(v1, v0);
+    XMFLOAT3 e2 = F3Sub(v2, v0);
+    XMFLOAT3 h  = F3Cross(dir, e2);
+    float    a  = F3Dot(e1, h);
+    if (a > -EPS && a < EPS) return false; // луч параллелен
+    float    f  = 1.f / a;
+    XMFLOAT3 s  = F3Sub(orig, v0);
+    float    u  = f * F3Dot(s, h);
+    if (u < 0.f || u > 1.f) return false;
+    XMFLOAT3 q  = F3Cross(s, e1);
+    float    v  = f * F3Dot(dir, q);
+    if (v < 0.f || u + v > 1.f) return false;
+    t = f * F3Dot(e2, q);
+    return (t > EPS);
+}
+
+// ============================================================
+//  Рейкаст по всему мешу (в world-space через worldMatrix_)
+// ============================================================
+bool Game::RaycastMesh(XMFLOAT3 origin, XMFLOAT3 dir,
+                        float maxDist, float& outT) const
+{
+    if (meshIdxs_.size() < 3) return false;
+
+    outT = maxDist;
+    bool hit = false;
+
+    // Приводим луч в object-space (инвертируем мировую матрицу)
+    XMMATRIX invWorld = XMMatrixInverse(nullptr, worldMatrix_);
+    XMVECTOR origV = XMVector3TransformCoord(XMLoadFloat3(&origin), invWorld);
+    XMVECTOR dirV  = XMVector3TransformNormal(XMLoadFloat3(&dir),   invWorld);
+    dirV = XMVector3Normalize(dirV);
+
+    XMFLOAT3 origOS, dirOS;
+    XMStoreFloat3(&origOS, origV);
+    XMStoreFloat3(&dirOS,  dirV);
+
+    const size_t triCount = meshIdxs_.size() / 3;
+    for (size_t i = 0; i < triCount; ++i)
+    {
+        UINT i0 = meshIdxs_[i*3+0];
+        UINT i1 = meshIdxs_[i*3+1];
+        UINT i2 = meshIdxs_[i*3+2];
+        float t = 0.f;
+        if (RayTriangle(origOS, dirOS,
+                        meshVerts_[i0].Position,
+                        meshVerts_[i1].Position,
+                        meshVerts_[i2].Position, t))
+        {
+            if (t < outT)
+            {
+                outT = t;
+                hit  = true;
+            }
+        }
+    }
+    return hit;
+}
+
+// ============================================================
+//  Выстрел: создаём снаряд из позиции камеры
+// ============================================================
+void Game::OnShoot()
+{
+    // Лимит снарядов в воздухе
+    int activeCount = 0;
+    for (auto& b : bullets_)
+        if (b.Active) ++activeCount;
+    if (activeCount >= MAX_BULLETS) return;
+
+    // Случайный красивый цвет: выбираем один из 6 насыщенных оттенков
+    static int colorIdx = 0;
+    static const XMFLOAT3 kColors[] = {
+        {1.0f, 0.3f, 0.05f},   // оранжево-красный
+        {0.1f, 0.5f, 1.0f},    // синий
+        {0.05f, 1.0f, 0.3f},   // зелёный
+        {1.0f, 0.9f, 0.1f},    // жёлтый
+        {0.8f, 0.1f, 1.0f},    // фиолетовый
+        {0.05f, 1.0f, 0.9f},   // циан
+    };
+    XMFLOAT3 col = kColors[colorIdx % 6];
+    ++colorIdx;
+
+    LightBullet b = {};
+    b.Position  = camPos_;
+    b.Direction = camForward_;
+    b.Color     = col;
+    b.Intensity = 8.0f;
+    b.Range     = 7.0f;
+    b.Speed     = BULLET_SPEED;
+    b.Active    = true;
+    b.Stuck     = false;
+    bullets_.push_back(b);
+}
+
+// ============================================================
+//  Обновление снарядов
+// ============================================================
+void Game::UpdateBullets(float dt)
+{
+    for (auto& b : bullets_)
+    {
+        if (!b.Active || b.Stuck) continue;
+
+        // Шаг движения
+        float stepLen = b.Speed * dt;
+        XMFLOAT3 newPos = F3Add(b.Position, F3Scale(b.Direction, stepLen));
+
+        // CPU рейкаст вдоль шага (origin = старая позиция, длина = stepLen)
+        float hitT = 0.f;
+        bool  hit  = RaycastMesh(b.Position, b.Direction, stepLen + 0.05f, hitT);
+
+        if (hit && hitT <= stepLen + 0.05f)
+        {
+            // Прилипаем: финальная позиция = точка удара
+            XMFLOAT3 hitPos = F3Add(b.Position, F3Scale(b.Direction, hitT));
+
+            b.Active = false;
+            b.Stuck  = true;
+            b.StuckPosition[0] = hitPos.x;
+            b.StuckPosition[1] = hitPos.y;
+            b.StuckPosition[2] = hitPos.z;
+
+            // Если достигнут лимит прилипших — убираем самый старый
+            if ((int)stuckLights_.size() >= MAX_STUCK_LIGHTS)
+                stuckLights_.erase(stuckLights_.begin());
+
+            StuckLight sl;
+            sl.Position  = hitPos;
+            sl.Color     = b.Color;
+            sl.Intensity = b.Intensity;
+            sl.Range     = b.Range;
+            stuckLights_.push_back(sl);
+        }
+        else
+        {
+            b.Position = newPos;
+
+            // Убиваем снаряд, если улетел слишком далеко
+            float dx = b.Position.x - camPos_.x;
+            float dy = b.Position.y - camPos_.y;
+            float dz = b.Position.z - camPos_.z;
+            float dist2 = dx*dx + dy*dy + dz*dz;
+            if (dist2 > BULLET_MAX_DIST * BULLET_MAX_DIST)
+                b.Active = false;
+        }
+    }
+
+    // Удаляем мёртвые (не летящие и не прилипшие) снаряды
+    bullets_.erase(
+        std::remove_if(bullets_.begin(), bullets_.end(),
+            [](const LightBullet& b){ return !b.Active && !b.Stuck; }),
+        bullets_.end());
+}
+
+// ============================================================
+//  Update
 // ============================================================
 void Game::Update(float deltaTime)
 {
-    rotationAngle_ += 0.8f * deltaTime;
-
-
-    // Для примера, будем менять расстояние автоматически
-    static float time = 0.0f;
-    time += deltaTime;
-    cameraDistance_ = 2.5f + sinf(time * 0.5f) * 1.5f; // колеблется от 1.0 до 4.0
-    XMVECTOR eye = XMVectorSet(
-        sinf(cameraAngle_) * cameraDistance_,
-        1.0f,
-        cosf(cameraAngle_) * cameraDistance_,
-        1.0f
-    );
-    // UV scroll animation
-    uvOffsetX_ += 0.5f * deltaTime;  // scroll horizontally
-    uvOffsetY_ += 0.0f * deltaTime;  // scroll vertically (slower)
-    // Wrap to [0, 1) to avoid floating-point drift
+    rotationAngle_ += 0.5f * deltaTime;
+    time_ += deltaTime;
+    uvOffsetX_ += 0.4f * deltaTime;
     if (uvOffsetX_ > 1.0f) uvOffsetX_ -= 1.0f;
-    if (uvOffsetY_ > 1.0f) uvOffsetY_ -= 1.0f;
-    float minDistance = 1.5f;
-    float maxDistance = 4.5f;
-    float blendFactor = 0.0f;
 
-    if (cameraDistance_ <= minDistance)
-        blendFactor = 1.0f;
-    else if (cameraDistance_ >= maxDistance)
-        blendFactor = 0.0f;
-    else
-        blendFactor = 1.0f - (cameraDistance_ - minDistance) / (maxDistance - minDistance);
+    cameraAngle_ += 0.18f * deltaTime;
+    float camH    = 2.5f + sinf(time_ * 0.3f) * 1.0f;
+    float camDist = 5.0f;
+    XMVECTOR eye    = XMVectorSet(sinf(cameraAngle_) * camDist, camH, cosf(cameraAngle_) * camDist, 1.f);
+    XMVECTOR target = XMVectorSet(0.f, 0.f, 0.f, 1.f);
+    XMVECTOR up     = XMVectorSet(0.f, 1.f, 0.f, 0.f);
 
-    XMMATRIX world  = XMMatrixRotationY(rotationAngle_)
-                    * XMMatrixRotationX(0.3f);
-    XMVECTOR target = XMVectorSet(0.0f, 0.0f,  0.0f, 1.0f);
-    XMVECTOR up     = XMVectorSet(0.0f, 1.0f,  0.0f, 0.0f);
+    XMMATRIX world  = XMMatrixRotationY(rotationAngle_);
+    worldMatrix_    = world;   // сохраняем для рейкаста
+
     XMMATRIX view   = XMMatrixLookAtLH(eye, target, up);
+    float    aspect = (height_ > 0) ? float(width_) / float(height_) : 1.f;
+    XMMATRIX proj   = XMMatrixPerspectiveFovLH(XMConvertToRadians(55.f), aspect, 0.1f, 200.f);
 
-    float aspect = (height_ > 0)
-        ? static_cast<float>(width_) / height_ : 1.0f;
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(
-        XMConvertToRadians(60.0f), aspect, 0.1f, 100.0f);
+    // Сохраняем позицию и направление камеры для стрельбы
+    XMStoreFloat3(&camPos_, eye);
+    XMVECTOR fwd = XMVector3Normalize(XMVectorSubtract(target, eye));
+    XMStoreFloat3(&camForward_, fwd);
 
-    ConstantBufferData cb = {};
-    cb.World      = XMMatrixTranspose(world);
-    cb.View       = XMMatrixTranspose(view);
-    cb.Proj       = XMMatrixTranspose(proj);
-    cb.LightPos   = XMFLOAT4(2.0f,  3.0f, -2.0f, 0.0f);
-    cb.LightColor = XMFLOAT4(1.0f,  1.0f,  1.0f, 1.0f);
-    cb.CameraPos  = XMFLOAT4(0.0f,  1.0f, -3.0f, 1.0f);
-    cb.Tiling     = XMFLOAT2(8.0f,  8.0f);         // tile texture 2x2
-    cb.UVOffset   = XMFLOAT2(uvOffsetX_, uvOffsetY_);
-    cb.BlendFactor = blendFactor;
+    float blend = 0.5f + 0.5f * sinf(time_ * 0.6f);
 
-    memcpy(cbMapped_, &cb, sizeof(cb));
+    // Geometry Pass CB
+    ConstantBufferData geomCB = {};
+    geomCB.World       = XMMatrixTranspose(world);
+    geomCB.View        = XMMatrixTranspose(view);
+    geomCB.Proj        = XMMatrixTranspose(proj);
+    geomCB.CameraPos   = { camPos_.x, camPos_.y, camPos_.z, 1.f };
+    geomCB.Tiling      = { 3.f, 3.f };
+    geomCB.UVOffset    = { uvOffsetX_, 1.9f };
+    geomCB.BlendFactor = blend;
+    rs_->UpdateGeometryPassCB(geomCB);
+
+    // ---- Обновление снарядов ----
+    UpdateBullets(deltaTime);
+
+    rs_->ClearLights();
+
+    // ---- Прилипшие световые источники (приоритет) ----
+    for (auto& sl : stuckLights_)
+        rs_->AddPointLight(sl.Position, sl.Color, sl.Intensity, sl.Range);
+
+    // ---- Летящие снаряды — тоже светят (небольшой радиус) ----
+    for (auto& b : bullets_)
+    {
+        if (b.Active && !b.Stuck)
+            rs_->AddPointLight(b.Position, b.Color, b.Intensity * 0.7f, 2.5f);
+    }
+
+    // ---- Динамические источники сцены ----
+    {
+        float sunAngle = time_ * 0.15f;
+        float sx = sinf(sunAngle);
+        float sy = -0.6f - 0.3f * cosf(time_ * 0.07f);
+        float sz = cosf(sunAngle);
+        rs_->AddDirectionalLight({ sx, sy, sz }, { 1.f, 0.92f, 0.75f }, 1.4f);
+    }
+    {
+        float moonAngle = time_ * 0.15f + PI;
+        rs_->AddDirectionalLight(
+            { sinf(moonAngle), -0.4f, cosf(moonAngle) },
+            { 0.35f, 0.4f, 0.65f }, 0.3f);
+    }
+    {
+        float a = time_ * 0.9f, r = 4.5f;
+        rs_->AddPointLight({ cosf(a)*r, 1.f, sinf(a)*r }, { 1.f, 0.15f, 0.05f }, 6.f, 9.f);
+    }
+    {
+        float a = time_ * 0.7f + 2.f*PI/3.f, r = 3.8f;
+        rs_->AddPointLight({ cosf(a)*r, 3.f+sinf(time_*0.5f)*1.5f, sinf(a)*r },
+                           { 0.1f, 0.4f, 1.f }, 5.f, 10.f);
+    }
+    {
+        float a = time_ * 1.1f + 4.f*PI/3.f, r = 3.2f;
+        float y = 1.5f + cosf(a*0.8f)*2.f;
+        rs_->AddPointLight({ cosf(a)*r, y, sinf(a)*r }, { 0.05f, 1.f, 0.3f }, 4.5f, 8.f);
+    }
+    {
+        float sweepAngle = time_ * 0.5f, sweepR = 0.6f;
+        XMFLOAT3 spotPos = { -5.f, 6.f, -5.f };
+        XMFLOAT3 spotDir = { sinf(sweepAngle)*sweepR, -1.f, cosf(sweepAngle)*sweepR };
+        float dlen = sqrtf(spotDir.x*spotDir.x + spotDir.y*spotDir.y + spotDir.z*spotDir.z);
+        spotDir = { spotDir.x/dlen, spotDir.y/dlen, spotDir.z/dlen };
+        rs_->AddSpotLight(spotPos, spotDir, { 1.f, 0.85f, 0.5f }, 8.f, 14.f, 12.f, 25.f);
+    }
+    {
+        float sweepAngle = -time_*0.7f + PI, sweepR = 0.5f;
+        XMFLOAT3 spotPos = { 5.f, 5.f, 5.f };
+        XMFLOAT3 spotDir = { sinf(sweepAngle)*sweepR-0.4f, -1.f, cosf(sweepAngle)*sweepR-0.4f };
+        float dlen = sqrtf(spotDir.x*spotDir.x + spotDir.y*spotDir.y + spotDir.z*spotDir.z);
+        spotDir = { spotDir.x/dlen, spotDir.y/dlen, spotDir.z/dlen };
+        rs_->AddSpotLight(spotPos, spotDir, { 0.8f, 0.1f, 1.f }, 7.f, 12.f, 10.f, 22.f);
+    }
+    {
+        float pulse = 0.6f + 0.4f*fabsf(sinf(time_*2.5f));
+        XMFLOAT3 spotPos = { 0.f, -3.f, 6.f };
+        XMFLOAT3 spotDir = { 0.f, 0.6f, -1.f };
+        float dlen = sqrtf(spotDir.x*spotDir.x + spotDir.y*spotDir.y + spotDir.z*spotDir.z);
+        spotDir = { spotDir.x/dlen, spotDir.y/dlen, spotDir.z/dlen };
+        rs_->AddSpotLight(spotPos, spotDir, { 1.f, 1.f, 1.f }, 5.f*pulse, 11.f, 8.f, 20.f);
+    }
+
+    LightingPassCB lCB = rs_->GetLightingCB();
+    lCB.CameraPos = { camPos_.x, camPos_.y, camPos_.z, 1.f };
+    rs_->UpdateLightingPassCB(lCB);
+
+
 }
 
-// ============================================================
-//  Render
-// ============================================================
 void Game::Render()
 {
-    PopulateCommandList();
+    rs_->BeginFrame();
+    rs_->BindGeometryPass();
+    rs_->DrawMesh();
 
-    ID3D12CommandList* lists[] = { commandList_.Get() };
-    commandQueue_->ExecuteCommandLists(1, lists);
+    rs_->BeginLightingPass();
+    rs_->DrawLightingQuad();
 
-    ThrowIfFailed(swapChain_->Present(1, 0));
-    MoveToNextFrame();
+    rs_->EndFrame();
 }
 
-void Game::PopulateCommandList()
-{
-    ThrowIfFailed(commandAllocators_[frameIndex_]->Reset());
-    ThrowIfFailed(commandList_->Reset(
-        commandAllocators_[frameIndex_].Get(), pso_.Get()));
-
-    D3D12_VIEWPORT vp = {};
-    vp.Width    = static_cast<float>(width_);
-    vp.Height   = static_cast<float>(height_);
-    vp.MaxDepth = 1.0f;
-
-    D3D12_RECT scissor = { 0, 0, width_, height_ };
-    commandList_->RSSetViewports(1, &vp);
-    commandList_->RSSetScissorRects(1, &scissor);
-
-    // Barrier: Present -> RenderTarget
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource   = renderTargets_[frameIndex_].Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    commandList_->ResourceBarrier(1, &barrier);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv =
-        rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += frameIndex_ * rtvDescSize_;
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv =
-        dsvHeap_->GetCPUDescriptorHandleForHeapStart();
-
-    commandList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
-
-    const float clearColor[] = { 0.05f, 0.08f, 0.18f, 1.0f };
-    commandList_->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
-    commandList_->ClearDepthStencilView(
-        dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-    // Bind SRV heap + root signature
-    ID3D12DescriptorHeap* heaps[] = { srvHeap_.Get() };
-    commandList_->SetDescriptorHeaps(1, heaps);
-    commandList_->SetGraphicsRootSignature(rootSignature_.Get());
-
-    // param[0]: CBV
-    commandList_->SetGraphicsRootConstantBufferView(
-        0, constantBuffer_->GetGPUVirtualAddress());
-    // param[1]: SRV descriptor table (texture)
-    commandList_->SetGraphicsRootDescriptorTable(
-        1, srvHeap_->GetGPUDescriptorHandleForHeapStart());
-
-    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    commandList_->IASetVertexBuffers(0, 1, &vbView_);
-    commandList_->IASetIndexBuffer(&ibView_);
-    commandList_->DrawIndexedInstanced(indexCount_, 1, 0, 0, 0);
-
-    // Barrier: RenderTarget -> Present
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-    commandList_->ResourceBarrier(1, &barrier);
-
-    ThrowIfFailed(commandList_->Close());
-}
-
-// ============================================================
-//  Resize
-// ============================================================
 void Game::Resize(int width, int height)
 {
-    // БАГ #3 ИСПРАВЛЕН: WM_SIZE может прийти с width=0/height=0 при минимизации
     if (width <= 0 || height <= 0) return;
-    // Дополнительная защита: если объекты ещё не созданы — выходим
-    if (!swapChain_ || !device_) return;
-
-    WaitForGPU();
-
     width_  = width;
     height_ = height;
-
-    for (UINT i = 0; i < FRAME_COUNT; ++i)
-        renderTargets_[i].Reset();
-    depthStencil_.Reset();
-
-    DXGI_SWAP_CHAIN_DESC1 scDesc = {};
-    swapChain_->GetDesc1(&scDesc);
-    ThrowIfFailed(swapChain_->ResizeBuffers(
-        FRAME_COUNT,
-        static_cast<UINT>(width_),
-        static_cast<UINT>(height_),
-        scDesc.Format, 0));
-
-    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
-    CreateRenderTargetViews();
-    CreateDepthStencilBuffer();
-}
-
-// ============================================================
-//  Sync
-// ============================================================
-void Game::WaitForGPU()
-{
-    ThrowIfFailed(commandQueue_->Signal(
-        fence_.Get(), fenceValues_[frameIndex_]));
-    ThrowIfFailed(fence_->SetEventOnCompletion(
-        fenceValues_[frameIndex_], fenceEvent_));
-    ::WaitForSingleObjectEx(fenceEvent_, INFINITE, FALSE);
-    ++fenceValues_[frameIndex_];
-}
-
-void Game::MoveToNextFrame()
-{
-    const UINT64 current = fenceValues_[frameIndex_];
-    ThrowIfFailed(commandQueue_->Signal(fence_.Get(), current));
-    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
-
-    if (fence_->GetCompletedValue() < fenceValues_[frameIndex_])
-    {
-        ThrowIfFailed(fence_->SetEventOnCompletion(
-            fenceValues_[frameIndex_], fenceEvent_));
-        ::WaitForSingleObjectEx(fenceEvent_, INFINITE, FALSE);
-    }
-    fenceValues_[frameIndex_] = current + 1;
+    rs_->Resize(width, height);
 }
