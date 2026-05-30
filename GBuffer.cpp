@@ -2,15 +2,15 @@
 #include "Utils.h"
 
 void GBuffer::Create(ID3D12Device* device,
-                     int width, int height,
-                     UINT rtvDescSize,
-                     D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart,
-                     ID3D12DescriptorHeap* srvHeap,
-                     UINT srvBaseSlot,
-                     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle)
+    int width, int height,
+    UINT rtvDescSize,
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart,
+    ID3D12DescriptorHeap* srvHeap,
+    UINT srvBaseSlot,
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle)
 {
-    width_     = width;
-    height_    = height;
+    width_ = width;
+    height_ = height;
     dsvHandle_ = dsvHandle;
 
     // Освобождаем старые ресурсы перед пересозданием
@@ -29,14 +29,14 @@ void GBuffer::CreateTextures(ID3D12Device* device)
     for (UINT i = 0; i < GBUFFER_RT_COUNT; ++i)
     {
         D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension          = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width              = static_cast<UINT>(width_);
-        desc.Height             = static_cast<UINT>(height_);
-        desc.DepthOrArraySize   = 1;
-        desc.MipLevels          = 1;
-        desc.Format             = kFormats[i];
-        desc.SampleDesc         = { 1, 0 };
-        desc.Flags              = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = static_cast<UINT>(width_);
+        desc.Height = static_cast<UINT>(height_);
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = kFormats[i];
+        desc.SampleDesc = { 1, 0 };
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
         D3D12_CLEAR_VALUE clear = {};
         clear.Format = kFormats[i];
@@ -49,20 +49,20 @@ void GBuffer::CreateTextures(ID3D12Device* device)
             &clear, IID_PPV_ARGS(&rt_[i])));
 
         // Debug names
-        const wchar_t* names[] = { L"GBuffer_Albedo", L"GBuffer_Normal", L"GBuffer_PBR" };
+        const wchar_t* names[] = { L"GBuffer_Albedo", L"GBuffer_Normal", L"GBuffer_PBR", L"GBuffer_WorldPos" };
         rt_[i]->SetName(names[i]);
     }
 }
 
 void GBuffer::CreateRTVs(ID3D12Device* device, UINT rtvDescSize,
-                          D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart)
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart)
 {
     D3D12_CPU_DESCRIPTOR_HANDLE handle = rtvHeapStart;
 
     for (UINT i = 0; i < GBUFFER_RT_COUNT; ++i)
     {
         D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
-        rtvDesc.Format        = kFormats[i];
+        rtvDesc.Format = kFormats[i];
         rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 
         device->CreateRenderTargetView(rt_[i].Get(), &rtvDesc, handle);
@@ -72,7 +72,7 @@ void GBuffer::CreateRTVs(ID3D12Device* device, UINT rtvDescSize,
 }
 
 void GBuffer::CreateSRVs(ID3D12Device* device,
-                          ID3D12DescriptorHeap* srvHeap, UINT srvBaseSlot)
+    ID3D12DescriptorHeap* srvHeap, UINT srvBaseSlot)
 {
     UINT srvDescSize = device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -87,10 +87,10 @@ void GBuffer::CreateSRVs(ID3D12Device* device,
     for (UINT i = 0; i < GBUFFER_RT_COUNT; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format                  = kFormats[i];
-        srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Format = kFormats[i];
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Texture2D.MipLevels     = 1;
+        srvDesc.Texture2D.MipLevels = 1;
 
         device->CreateShaderResourceView(rt_[i].Get(), &srvDesc, cpuHandle);
         cpuHandle.ptr += srvDescSize;
@@ -98,19 +98,19 @@ void GBuffer::CreateSRVs(ID3D12Device* device,
 }
 
 void GBuffer::TransitionTo(ID3D12GraphicsCommandList* cmd,
-                            D3D12_RESOURCE_STATES state)
+    D3D12_RESOURCE_STATES state)
 {
     D3D12_RESOURCE_BARRIER barriers[GBUFFER_RT_COUNT] = {};
     for (UINT i = 0; i < GBUFFER_RT_COUNT; ++i)
     {
-        barriers[i].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[i].Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        barriers[i].Transition.pResource   = rt_[i].Get();
+        barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[i].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        barriers[i].Transition.pResource = rt_[i].Get();
         barriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         barriers[i].Transition.StateBefore = (state == D3D12_RESOURCE_STATE_RENDER_TARGET)
             ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
             : D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[i].Transition.StateAfter  = state;
+        barriers[i].Transition.StateAfter = state;
     }
     cmd->ResourceBarrier(GBUFFER_RT_COUNT, barriers);
 }

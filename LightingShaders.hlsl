@@ -40,7 +40,9 @@ cbuffer LightingCB : register(b0)
 
 Texture2D gAlbedo : register(t0);
 Texture2D gNormal : register(t1);
-Texture2D gPBR    : register(t2);
+Texture2D gPBR : register(t2);
+
+Texture2D gWorldPos : register(t3);
 
 SamplerState gSampler : register(s0);  
 
@@ -154,10 +156,8 @@ float4 PSMain(FSQOutput input) : SV_TARGET
 
     float3 N = normalize(normal);
     
-    float3 worldPos = float3(
-        (input.UV.x * 2.0f - 1.0f) * 5.0f,
-        (1.0f - input.UV.y * 2.0f) * 5.0f,
-        0.0f);
+    
+    float3 worldPos = gWorldPos.Sample(gSampler, input.UV).rgb;
 
     float3 V = normalize(CameraPos.xyz - worldPos);
     

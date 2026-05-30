@@ -4,15 +4,30 @@
 #include <string>
 #include "Types.h"
 
-// Result of loading an OBJ file
+// ============================================================
+//  SubMesh — диапазон индексов с одним материалом
+//  diffusePath  = map_Kd  (albedo/diffuse текстура)
+//  normalPath   = map_bump / bump / map_Kn (normal map, DDN)
+// ============================================================
+struct SubMesh
+{
+    UINT         indexStart  = 0;
+    UINT         indexCount  = 0;
+    std::wstring diffusePath;   // может быть пустой
+    std::wstring normalPath;    // может быть пустой
+    std::string  materialName;
+};
+
+// ============================================================
+//  ObjResult
+// ============================================================
 struct ObjResult
 {
-    std::vector<Vertex> vertices;    // flat vertex list
-    std::vector<UINT>   indices;     // sequential 0,1,2,...,N-1
-    std::wstring        texturePath; // first diffuse texture found (empty if none)
-    bool                valid;
-
-    ObjResult() : valid(false) {}
+    std::vector<Vertex>  vertices;
+    std::vector<UINT>    indices;
+    std::vector<SubMesh> subMeshes;   // per-material группы
+    std::wstring         texturePath; // первая диффузная (legacy)
+    bool                 valid = false;
 };
 
 // Parse .obj + .mtl files.

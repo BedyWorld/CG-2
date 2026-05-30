@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <unordered_map>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -22,32 +23,42 @@ using Microsoft::WRL::ComPtr;
 static const UINT RS_FRAME_COUNT = 2;
 
 // ============================================================
-//  RenderingSystem — D3D12-инфраструктура с Deferred Rendering
-//
-//  Архитектура двух проходов:
-//    1. Geometry Pass  — заполняет GBuffer (Albedo / Normal / PBR)
-//    2. Lighting Pass  — full-screen quad, читает GBuffer,
-//                        вычисляет освещение от 3 типов источников
-//
-//  Источники света (MAX_LIGHTS = 16):
-//    - Directional  — бесконечно далёкий направленный свет
-//    - Point        — точечный свет с затуханием по 1/d²
-//    - Spot         — конический свет (inner/outer cosine angles)
-//
-//  SRV-хип (shader-visible, 8 слотов):
-//    slot 0 — texture A (t0, geometry pass)
-//    slot 1 — texture B (t1, geometry pass)
-//    slot 2 — (reserved)
-//    slot 3 — (reserved)
-//    slot 4 — GBuffer Albedo  (t4, lighting pass)
-//    slot 5 — GBuffer Normal  (t5, lighting pass)
-//    slot 6 — GBuffer PBR     (t6, lighting pass)
-//    slot 7 — (reserved)
-//
-//  RTV-хип:
-//    slot 0,1 — swap chain back buffers
-//    slot 2,3,4 — GBuffer RT0/RT1/RT2
+//  SubDrawCall — один draw call для geometry pass
 // ============================================================
+struct SubDrawCall
+{
+    UINT indexStart = 0;
+    UINT indexCount = 0;
+    int  srvDiffuse = 0;   // SRV-слот диффузной текстуры  (t0)
+    int  srvNormal = 0;   // SRV-слот normal map           (t2)
+};
+
+// ============================================================
+//  SRV-хип раскладка (256 слотов достаточно):
+//    slot 0          — fallback albedo (серый 200,200,200)
+//    slot 1          — fallback normal (flat 128,128,255)
+//    slot 2          — fallback disp   (нейтральный 128)
+//    slot 3          — albedo2 общий   (для blending)
+//    slot 4..7       — GBuffer (Albedo, Normal, PBR, WorldPos)
+//    slot 8+         — уникальные текстуры (кэшируются по пути)
+//
+//  Root Signature geometry pass (5 параметров):
+//    param[0] = CBV  b0           — ConstantBufferData
+//    param[1] = SRV  t0 (inline)  — diffuse текущего материала
+//    param[2] = SRV  t1 (inline)  — albedo2 (общий, slot 3)
+//    param[3] = SRV  t2 (inline)  — normal map
+//    param[4] = SRV  t3 (inline)  — displacement (общий, slot 2)
+//  Inline SRV не требуют блоков подряд — каждый указывается
+//  отдельным SetGraphicsRootShaderResourceView(slot, gpuVA).
+//  НО: inline SRV требует буфер (не текстуру) либо DescriptorTable.
+//  Используем DescriptorTable по 1 дескриптору каждый:
+//    param[1] = DescriptorTable { range: 1 SRV t0 }
+//    param[2] = DescriptorTable { range: 1 SRV t1 }
+//    param[3] = DescriptorTable { range: 1 SRV t2 }
+//    param[4] = DescriptorTable { range: 1 SRV t3 }
+//  Тогда SetGraphicsRootDescriptorTable(N, gpuHandle) на каждый слот.
+// ============================================================
+
 class RenderingSystem
 {
 public:
@@ -61,63 +72,58 @@ public:
     void Initialize();
     void BeginResourceUpload();
     void EndResourceUpload();
-
-    // ---- Текстуры ----
-    void UploadTexture(const TextureData& td, int slot = 0);
     void ReleaseTextureUploadBuffers();
 
     // ---- Геометрия ----
-    void BuildBuffers(const std::vector<Vertex>& verts,
-                      const std::vector<UINT>&   idxs);
+    void BuildMesh1(const std::vector<Vertex>& verts,
+        const std::vector<UINT>& idxs,
+        const std::vector<UINT>& subIndexStarts,
+        const std::vector<UINT>& subIndexCounts,
+        const std::vector<std::wstring>& subDiffuse,
+        const std::vector<std::wstring>& subNormal);
+
+    void BuildBuffers2(const std::vector<Vertex>& verts, const std::vector<UINT>& idxs);
+
+    // ---- Текстуры mesh2 (slot 0..3) ----
+    void UploadTextureMesh2(const TextureData& td, int slot);
 
     // ---- Константные буферы ----
     void CreateConstantBuffers();
     void UpdateGeometryPassCB(const ConstantBufferData& data);
+    void UpdateGeometryPassCB2(const ConstantBufferData& data);
     void UpdateLightingPassCB(const LightingPassCB& data);
 
-    // ---- Управление источниками света ----
+    // ---- Источники света ----
     void ClearLights();
     void AddDirectionalLight(XMFLOAT3 direction, XMFLOAT3 color, float intensity);
     void AddPointLight(XMFLOAT3 position, XMFLOAT3 color, float intensity, float range);
     void AddSpotLight(XMFLOAT3 position, XMFLOAT3 direction,
-                      XMFLOAT3 color, float intensity, float range,
-                      float innerAngleDeg, float outerAngleDeg);
+        XMFLOAT3 color, float intensity, float range,
+        float innerAngleDeg, float outerAngleDeg);
 
     // ---- Кадр ----
-    // Возвращает командный список. Вызов включает:
-    //   reset аллокатора, барьер, GBuffer geometry pass setup.
     ID3D12GraphicsCommandList* BeginFrame();
 
-    // Привязывает geometry-pass PSO + root signature + текстуры + CB.
-    void BindGeometryPass();
-
-    // Рисует меш (VB + IB).
-    void DrawMesh();
-
-    // Переключается с Geometry Pass на Lighting Pass:
-    //   - GBuffer RT → SRV
-    //   - swap chain RT → RT
-    //   - привязывает lighting PSO + fullscreen quad
+    void BindGeometryPass();        // биндит PSO, CB1, общие текстуры
+    void DrawMesh1SubMeshes();      // per-material draw calls
+    void BindGeometryPassMesh2();
+    void DrawMesh2();
     void BeginLightingPass();
-
-    // Рисует full-screen quad (6 вершин, нет VB — позиции в шейдере).
     void DrawLightingQuad();
-
-    // Закрывает список, ExecuteCommandLists, Present, MoveToNextFrame.
     void EndFrame();
 
     // ---- Resize ----
     void Resize(int width, int height);
 
     // ---- Геттеры ----
-    ID3D12Device*              GetDevice()      const { return device_.Get(); }
+    ID3D12Device* GetDevice()      const { return device_.Get(); }
     ID3D12GraphicsCommandList* GetCommandList() const { return commandList_.Get(); }
-    const LightingPassCB&      GetLightingCB()  const { return lightingCB_; }
+    const LightingPassCB& GetLightingCB()  const { return lightingCB_; }
     int  GetWidth()  const { return width_; }
     int  GetHeight() const { return height_; }
+    bool HasMesh2()  const { return indexCount2_ > 0; }
 
 private:
-    // ---- Init helpers ----
     void CreateDevice();
     void CreateCommandQueue();
     void CreateSwapChain();
@@ -130,87 +136,93 @@ private:
     void CreateLightingPassRootSignature();
     void CreateGeometryPassPSO();
     void CreateLightingPassPSO();
-    void CreateFullscreenQuadBuffers();
-
-    // ---- Sync ----
     void WaitForGPU();
     void MoveToNextFrame();
-
-    // ---- Helpers ----
-    void MakeUploadBuffer(const void* data, UINT64 byteSize,
-                          ComPtr<ID3D12Resource>& buf);
+    void MakeUploadBuffer(const void* data, UINT64 byteSize, ComPtr<ID3D12Resource>& buf);
     ComPtr<ID3DBlob> CompileShader(const std::string& source,
-                                   const std::string& entry,
-                                   const std::string& target);
+        const std::string& entry,
+        const std::string& target);
 
-    // ---- Window ----
+    // Загрузить текстуру и вернуть её SRV-слот (с кэшированием по пути)
+    int  LoadAndCacheTexture(const std::wstring& path, bool isNormal);
+    // Физически загрузить TextureData в хип, занять слот
+    int  UploadTextureToHeap(const TextureData& td);
+    void CreateSRVInSlot(ID3D12Resource* res, DXGI_FORMAT fmt, int slot);
+    // GPU-handle по номеру слота
+    D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle(int slot) const;
+
     HWND hwnd_;
-    int  width_;
-    int  height_;
+    int  width_, height_;
 
-    // ---- D3D12 core ----
     ComPtr<ID3D12Device>              device_;
     ComPtr<ID3D12CommandQueue>        commandQueue_;
     ComPtr<IDXGISwapChain3>           swapChain_;
 
-    // ---- Descriptor heaps ----
-    // RTV: 2 swapchain + 3 GBuffer = 5 total
     ComPtr<ID3D12DescriptorHeap>      rtvHeap_;
     ComPtr<ID3D12DescriptorHeap>      dsvHeap_;
-    // SRV shader-visible: slot0-1 textures, slot4-6 GBuffer = 8 total
     ComPtr<ID3D12DescriptorHeap>      srvHeap_;
     UINT                              rtvDescSize_ = 0;
     UINT                              srvDescSize_ = 0;
+    int                               srvNextFree_ = 0;
 
-    // ---- Swap chain RTs + depth ----
+    // Хип на 256 дескрипторов — достаточно для ~60 уникальных текстур + GBuffer + reserved
+    static const int SRV_HEAP_SIZE = 256;
+    static const int SRV_GBUF_BASE = 4;   // слоты 4..7 — GBuffer
+
+    // Зарезервированные слоты (заполняются в BuildMesh1/BeginResourceUpload)
+    static const int SRV_FALLBACK_ALBEDO = 0;
+    static const int SRV_FALLBACK_NORMAL = 1;
+    static const int SRV_FALLBACK_DISP = 2;
+    static const int SRV_COMMON_ALBEDO2 = 3;
+
     ComPtr<ID3D12Resource>            renderTargets_[RS_FRAME_COUNT];
     D3D12_CPU_DESCRIPTOR_HANDLE       rtvHandles_[RS_FRAME_COUNT] = {};
     ComPtr<ID3D12Resource>            depthStencil_;
     D3D12_CPU_DESCRIPTOR_HANDLE       dsvHandle_ = {};
 
-    // ---- GBuffer ----
     GBuffer gbuffer_;
 
-    // ---- Command objects ----
     ComPtr<ID3D12CommandAllocator>    commandAllocators_[RS_FRAME_COUNT];
     ComPtr<ID3D12GraphicsCommandList> commandList_;
 
-    // ---- Geometry Pass pipeline ----
     ComPtr<ID3D12RootSignature>       geometryRootSig_;
     ComPtr<ID3D12PipelineState>       geometryPSO_;
-
-    // ---- Lighting Pass pipeline ----
     ComPtr<ID3D12RootSignature>       lightingRootSig_;
     ComPtr<ID3D12PipelineState>       lightingPSO_;
 
-    // ---- Fullscreen quad (для lighting pass) ----
-    // Нет VB — позиции генерируются из SV_VertexID в шейдере.
-    // Но держим заглушку для будущей расширяемости.
-
-    // ---- Геометрия сцены ----
+    // ---- Mesh1 ----
     ComPtr<ID3D12Resource>            vertexBuffer_;
     ComPtr<ID3D12Resource>            indexBuffer_;
     D3D12_VERTEX_BUFFER_VIEW          vbView_ = {};
     D3D12_INDEX_BUFFER_VIEW           ibView_ = {};
     UINT                              indexCount_ = 0;
+    std::vector<SubDrawCall>          subDrawCalls_;
 
-    // ---- Текстуры (slot 0 и 1) ----
-    ComPtr<ID3D12Resource>            texture_;
-    ComPtr<ID3D12Resource>            textureUpload_;
-    ComPtr<ID3D12Resource>            texture2_;
-    ComPtr<ID3D12Resource>            textureUpload2_;
+    // ---- Mesh2 ----
+    ComPtr<ID3D12Resource>            vertexBuffer2_;
+    ComPtr<ID3D12Resource>            indexBuffer2_;
+    D3D12_VERTEX_BUFFER_VIEW          vbView2_ = {};
+    D3D12_INDEX_BUFFER_VIEW           ibView2_ = {};
+    UINT                              indexCount2_ = 0;
+    // Mesh2 текстуры: 4 слота начиная с mesh2SrvBase_
+    int                               mesh2SrvBase_ = 0;
 
-    // ---- Константные буферы ----
-    // Geometry Pass CB
+    // Все загруженные GPU-ресурсы (для lifetime)
+    std::vector<ComPtr<ID3D12Resource>> texResources_;
+    std::vector<ComPtr<ID3D12Resource>> texUploads_;
+
+    // Кэш путь -> SRV слот
+    std::unordered_map<std::wstring, int> texCache_;
+
+    // ---- CB ----
     ComPtr<ID3D12Resource>            geometryCB_;
-    ConstantBufferData*               geometryCBMapped_ = nullptr;
-
-    // Lighting Pass CB
+    ConstantBufferData* geometryCBMapped_ = nullptr;
+    ComPtr<ID3D12Resource>            geometryCB2_;
+    ConstantBufferData* geometryCB2Mapped_ = nullptr;
     ComPtr<ID3D12Resource>            lightingCBRes_;
-    LightingPassCB*                   lightingCBMapped_ = nullptr;
-    LightingPassCB                    lightingCB_ = {};  // CPU-копия
+    LightingPassCB* lightingCBMapped_ = nullptr;
+    LightingPassCB                    lightingCB_ = {};
 
-    // ---- Fence ----
     ComPtr<ID3D12Fence>               fence_;
     UINT64                            fenceValues_[RS_FRAME_COUNT] = {};
     HANDLE                            fenceEvent_ = nullptr;

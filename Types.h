@@ -25,54 +25,58 @@ enum class LightType : UINT
 // Один источник света (GPU-совместимый, 96 байт)
 struct LightData
 {
-    XMFLOAT4 PositionWS;        // world-space позиция (Point / Spot)
-    XMFLOAT4 DirectionWS;       // world-space направление (Directional / Spot)
-    XMFLOAT4 Color;             // RGB цвет + интенсивность в W
-    float    Range;             // радиус затухания (Point / Spot)
-    float    SpotInnerCosine;   // cos внутреннего угла конуса (Spot)
-    float    SpotOuterCosine;   // cos внешнего угла конуса (Spot)
-    UINT     Type;              // LightType (0=Dir, 1=Point, 2=Spot)
-};                              // 96 bytes
+    XMFLOAT4 PositionWS;
+    XMFLOAT4 DirectionWS;
+    XMFLOAT4 Color;
+    float    Range;
+    float    SpotInnerCosine;
+    float    SpotOuterCosine;
+    UINT     Type;
+};  // 96 bytes
 
 static const UINT MAX_LIGHTS = 16;
 
-// ---- Constant Buffer для Geometry Pass (256 байт) ----
+// ---- Constant Buffer для Geometry Pass (с тесселяцией) ----
 struct ConstantBufferData
 {
-    XMMATRIX World;       // 64
-    XMMATRIX View;        // 64
-    XMMATRIX Proj;        // 64
-    XMFLOAT4 CameraPos;   // 16
-    XMFLOAT2 Tiling;      //  8
-    XMFLOAT2 UVOffset;    //  8
-    float    BlendFactor; //  4
-    float    Padding[3];  // 12
-                          // total = 240
+    XMMATRIX World;             // 64
+    XMMATRIX View;              // 64
+    XMMATRIX Proj;              // 64
+    XMFLOAT4 CameraPos;         // 16
+    XMFLOAT2 Tiling;            //  8
+    XMFLOAT2 UVOffset;          //  8
+    float    BlendFactor;       //  4
+    // ---- тесселяция ----
+    float    TessNear;          //  4  — дистанция максимального уровня тесселяции
+    float    TessFar;           //  4  — дистанция минимального уровня тесселяции
+    float    TessMinLevel;      //  4  — мин. уровень (вдали)
+    float    TessMaxLevel;      //  4  — макс. уровень (вблизи)
+    float    DisplacementScale; //  4  — сила displacement
+    float    Padding[2];        //  8
+                                // total = 256
 };
 
 // ---- Constant Buffer для Lighting Pass ----
 struct LightingPassCB
 {
-    XMFLOAT4 CameraPos;           // 16
-    int      LightCount;          //  4
-    XMFLOAT3 Padding0;            // 12
-    LightData Lights[MAX_LIGHTS]; // MAX_LIGHTS * 96 = 1536
-                                  // total = 1568
+    XMFLOAT4 CameraPos;
+    int      LightCount;
+    XMFLOAT3 Padding0;
+    LightData Lights[MAX_LIGHTS];
 };
 
 // ============================================================
-//  Световой снаряд — летит по прямой, при ударе о геометрию
-//  превращается в постоянный точечный источник света.
+//  Световой снаряд
 // ============================================================
 struct LightBullet
 {
-    XMFLOAT3 Position;      // текущая позиция в world-space
-    XMFLOAT3 Direction;     // нормализованное направление полёта
-    XMFLOAT3 Color;         // цвет света
-    float    Intensity;     // интенсивность
-    float    Range;         // радиус освещения после прилипания
-    float    Speed;         // скорость в unit/sec
-    bool     Active;        // true = ещё летит, false = прилип или мёртв
-    bool     Stuck;         // true = прилип к геометрии, продолжает светить
-    float    StuckPosition[3]; // позиция прилипания (копия Position после удара)
+    XMFLOAT3 Position;
+    XMFLOAT3 Direction;
+    XMFLOAT3 Color;
+    float    Intensity;
+    float    Range;
+    float    Speed;
+    bool     Active;
+    bool     Stuck;
+    float    StuckPosition[3];
 };

@@ -17,7 +17,7 @@ public:
     // onUpdate(deltaTime) is called each frame before rendering.
     // onRender() is called each frame to render.
     int Run(std::function<void(float)> onUpdate,
-            std::function<void()>      onRender);
+        std::function<void()>      onRender);
 
     HWND         GetHWND()        const { return hwnd_; }
     int          GetWidth()       const { return width_; }
@@ -29,7 +29,7 @@ public:
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
-                                    WPARAM wParam, LPARAM lParam);
+        WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
 
     HINSTANCE    hInstance_;
@@ -41,5 +41,5 @@ private:
     std::unique_ptr<InputDevice> input_;
 
     LARGE_INTEGER frequency_ = {};
-    LARGE_INTEGER lastTime_  = {};
+    LARGE_INTEGER lastTime_ = {};
 };

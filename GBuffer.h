@@ -8,18 +8,20 @@ using Microsoft::WRL::ComPtr;
 // ============================================================
 //  GBuffer — набор render target'ов для Deferred Rendering
 //
-//  RT0 (DXGI_FORMAT_R8G8B8A8_UNORM)     — Albedo (RGB) + unused (A)
-//  RT1 (DXGI_FORMAT_R16G16B16A16_FLOAT) — Normal (RGB) в world space + unused (A)
-//  RT2 (DXGI_FORMAT_R8G8B8A8_UNORM)     — Roughness (R), Metallic (G), AO (B), unused (A)
-//  Depth (DXGI_FORMAT_D32_FLOAT)         — общий depth buffer
+//  RT0 (DXGI_FORMAT_R8G8B8A8_UNORM)        — Albedo (RGB) + unused (A)
+//  RT1 (DXGI_FORMAT_R16G16B16A16_FLOAT)    — Normal (RGB) в world space + unused (A)
+//  RT2 (DXGI_FORMAT_R8G8B8A8_UNORM)        — Roughness (R), Metallic (G), AO (B), unused (A)
+//  RT3 (DXGI_FORMAT_R32G32B32A32_FLOAT)    — WorldPos (XYZ) + unused (W)
+//  Depth (DXGI_FORMAT_D32_FLOAT)            — общий depth buffer
 //
-//  Схема дескрипторных слотов в общем SRV-хипе (GBuffer занимает слоты 4..6):
-//    slot 4 — Albedo SRV  (t4)
-//    slot 5 — Normal SRV  (t5)
-//    slot 6 — PBR SRV     (t6)
+//  Схема дескрипторных слотов в общем SRV-хипе (GBuffer занимает слоты 4..7):
+//    slot 4 — Albedo SRV  (t0 в lighting)
+//    slot 5 — Normal SRV  (t1 в lighting)
+//    slot 6 — PBR SRV     (t2 в lighting)
+//    slot 7 — WorldPos SRV (t3 в lighting)
 // ============================================================
 
-static const UINT GBUFFER_RT_COUNT = 3;
+static const UINT GBUFFER_RT_COUNT = 4;
 
 class GBuffer
 {
@@ -35,16 +37,16 @@ public:
     // srvHeap      — shader-visible SRV-хип, GBuffer пишет в слоты [srvBaseSlot..+3).
     // dsvHeapStart — DSV-хип (слот 0 уже занят основным depth; GBuffer использует его же).
     void Create(ID3D12Device* device,
-                int width, int height,
-                UINT rtvDescSize,
-                D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart,  // слот 2 (после 0 и 1 swapchain)
-                ID3D12DescriptorHeap* srvHeap,             // shader-visible heap
-                UINT srvBaseSlot,                          // первый свободный SRV-слот (4)
-                D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);    // shared depth
+        int width, int height,
+        UINT rtvDescSize,
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart,  // слот 2 (после 0 и 1 swapchain)
+        ID3D12DescriptorHeap* srvHeap,             // shader-visible heap
+        UINT srvBaseSlot,                          // первый свободный SRV-слот (4)
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);    // shared depth
 
     // Переводит RT-текстуры в нужное состояние.
     void TransitionTo(ID3D12GraphicsCommandList* cmd,
-                      D3D12_RESOURCE_STATES state);
+        D3D12_RESOURCE_STATES state);
 
     // Очищает все RT-буферы.
     void Clear(ID3D12GraphicsCommandList* cmd);
@@ -65,11 +67,11 @@ public:
 private:
     void CreateTextures(ID3D12Device* device);
     void CreateRTVs(ID3D12Device* device, UINT rtvDescSize,
-                    D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart);
     void CreateSRVs(ID3D12Device* device,
-                    ID3D12DescriptorHeap* srvHeap, UINT srvBaseSlot);
+        ID3D12DescriptorHeap* srvHeap, UINT srvBaseSlot);
 
-    int  width_  = 0;
+    int  width_ = 0;
     int  height_ = 0;
 
     // Render target resources
@@ -89,6 +91,7 @@ private:
         DXGI_FORMAT_R8G8B8A8_UNORM,         // Albedo
         DXGI_FORMAT_R16G16B16A16_FLOAT,     // Normal
         DXGI_FORMAT_R8G8B8A8_UNORM,         // PBR (roughness/metallic/ao)
+        DXGI_FORMAT_R32G32B32A32_FLOAT,     // WorldPos (xyz) + unused (w)
     };
 
     // Цвета очистки
@@ -96,5 +99,6 @@ private:
         { 0.0f, 0.0f, 0.0f, 1.0f },
         { 0.0f, 0.0f, 0.0f, 0.0f },
         { 0.5f, 0.0f, 1.0f, 0.0f },  // roughness=0.5, metallic=0, ao=1
+        { 0.0f, 0.0f, 0.0f, 0.0f },  // WorldPos
     };
 };
