@@ -565,27 +565,13 @@ void RenderingSystem::CreateGeometryPassPSO()
     pso.DSVFormat = DXGI_FORMAT_D32_FLOAT; pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&geometryPSO_)));
 
-    // Каркасный вариант. FillMode входит в неизменяемое состояние конвейера,
-    // поэтому переключить его на лету нельзя - нужен отдельный PSO.
-    // Отсечение граней выключаем: иначе половина рёбер пропадёт и по сетке
-    // будет трудно понять, что именно наплодил тесселятор.
+    // Каркасный вариант
     raster.FillMode = D3D12_FILL_MODE_WIREFRAME;
     raster.CullMode = D3D12_CULL_MODE_NONE;
     pso.RasterizerState = raster;
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&geometryWirePSO_)));
 }
 
-// ============================================================
-//  Lighting Pass PSO
-// ============================================================
-
-// ============================================================
-//  ДЗ №4: шейдер разбросанных объектов
-//
-//  Тесселяции нет намеренно. Несколько тысяч объектов, прогнанных
-//  через HS/DS, съедают кадр целиком, а рельеф на мелких телах
-//  всё равно не читается. Пишет в те же четыре цели G-buffer'а.
-// ============================================================
 static const char* kInstancedShaderSrc = R"HLSL(
 cbuffer GeometryCB : register(b0)
 {
