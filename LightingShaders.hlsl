@@ -1,4 +1,3 @@
-// ============================================================
 //  LightingShaders.hlsl — Lighting Pass (Deferred Rendering)
 //
 //  Читает GBuffer и вычисляет финальный цвет пикселя.
@@ -12,7 +11,6 @@
 //    t0 — Albedo  (R8G8B8A8_UNORM)      rgb=albedo
 //    t1 — Normal  (R16G16B16A16_FLOAT)  rgb=world-space normal
 //    t2 — PBR     (R8G8B8A8_UNORM)      r=roughness, g=metallic, b=ao
-// ============================================================
 
 #define MAX_LIGHTS 16
 #define LIGHT_DIRECTIONAL 0
@@ -21,9 +19,9 @@
 
 struct LightData
 {
-    float4 PositionWS;      // xyz=pos,  w=1 (Point/Spot) или 0 (Dir)
-    float4 DirectionWS;     // xyz=dir (нормализован в C++)
-    float4 Color;           // xyz=rgb, w=intensity
+    float4 PositionWS; 
+    float4 DirectionWS;
+    float4 Color;
     float  Range;
     float  SpotInnerCosine;
     float  SpotOuterCosine;
@@ -69,15 +67,12 @@ FSQOutput VSMain(uint vid : SV_VertexID)
     return o;
 }
 
-// Затухание по расстоянию
 float ComputeAttenuation(float distance, float range)
 {
-    // Smooth step к нулю на границе range
     float falloff = saturate(1.0f - (distance / range));
     return falloff * falloff / (distance * distance + 1.0f);
 }
 
-// Blinn-Phong BRDF: diffuse + specular
 float3 BlinnPhong(float3 N, float3 L, float3 V,
                    float3 albedo, float roughness, float3 lightColor)
 {
@@ -93,7 +88,6 @@ float3 BlinnPhong(float3 N, float3 L, float3 V,
     return diffuse + specular;
 }
 
-// ---- Directional Light ----
 float3 CalcDirectional(LightData light, float3 N, float3 V, float3 albedo, float roughness)
 {
     float3 L = normalize(-light.DirectionWS.xyz);
@@ -101,7 +95,6 @@ float3 CalcDirectional(LightData light, float3 N, float3 V, float3 albedo, float
     return color;
 }
 
-// ---- Point Light ----
 float3 CalcPoint(LightData light, float3 worldPos, float3 N, float3 V,
                   float3 albedo, float roughness)
 {
@@ -131,7 +124,7 @@ float3 CalcSpot(LightData light, float3 worldPos, float3 N, float3 V,
     float spotFactor = saturate(
         (cosAngle - light.SpotOuterCosine) /
         (light.SpotInnerCosine - light.SpotOuterCosine + 0.0001f));
-    spotFactor = spotFactor * spotFactor;  // квадрат для мягкого fade
+    spotFactor = spotFactor * spotFactor;
 
     float  att = ComputeAttenuation(dist, light.Range);
     float3 col = BlinnPhong(N, L, V, albedo, roughness, light.Color.rgb * light.Color.w);
@@ -150,7 +143,6 @@ float4 PSMain(FSQOutput input) : SV_TARGET
     float normalLen = dot(normal, normal);
     if (normalLen < 0.01f)
     {
-        // Фоновый цвет — тёмно-синий
         return float4(0.02f, 0.02f, 0.05f, 1.0f);
     }
 
@@ -179,7 +171,6 @@ float4 PSMain(FSQOutput input) : SV_TARGET
 
     float3 finalColor = ambient + lighting;
 
-    // Tone mapping (Reinhard) — защита от пересветов
     finalColor = finalColor / (finalColor + 1.0f);
 
     return float4(finalColor, 1.0f);

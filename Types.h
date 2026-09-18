@@ -1,4 +1,5 @@
-#pragma once
+﻿#pragma once
+#include <cstddef>   // offsetof
 #include <DirectXMath.h>
 using namespace DirectX;
 
@@ -52,17 +53,32 @@ struct ConstantBufferData
     float    TessMinLevel;      //  4  — мин. уровень (вдали)
     float    TessMaxLevel;      //  4  — макс. уровень (вблизи)
     float    DisplacementScale; //  4  — сила displacement
-    float    Padding[2];        //  8
+    // Каркасный режим (клавиша G). Занят один float из бывшего Padding[2],
+    // поэтому размер структуры не изменился и проверки ниже остались верны.
+    float    WireMode;          //  4  — >0.5 рисуем сетку самосветящейся
+    float    Padding;           //  4
                                 // total = 256
 };
 
 // ---- Constant Buffer для Lighting Pass ----
+static const int MAX_CASCADES = 4;
+
 struct LightingPassCB
 {
     XMFLOAT4 CameraPos;
     int      LightCount;
     XMFLOAT3 Padding0;
     LightData Lights[MAX_LIGHTS];
+
+    // ---- ДЗ №5: каскадные тени ----
+    // Смещения кратны 16 байтам, порядок обязан совпадать с cbuffer в HLSL.
+    XMFLOAT4X4 ShadowViewProj[MAX_CASCADES];   // матрицы света по каскадам
+    XMFLOAT4   CascadeSplits;                  // дальние границы во view-space
+    XMFLOAT4X4 CameraView;                     // нужна для глубины в view-space
+    int        ShadowLightIndex;               // -1 = теней нет
+    float      ShadowMapSize;
+    float      ShadowBias;
+    float      DebugCascades;      // >0.5 — подкрасить каскады (клавиша V)
 };
 
 // ============================================================
@@ -80,3 +96,23 @@ struct LightBullet
     bool     Stuck;
     float    StuckPosition[3];
 };
+
+// ============================================================
+//  Раскладка обязана совпадать с cbuffer в HLSL байт в байт.
+//  Проверки ниже ловят перестановку или вставку поля на этапе
+//  КОМПИЛЯЦИИ. Без них рассинхрон проходит молча: шейдер просто
+//  читает мусор со сдвинутых смещений, и искать это приходится
+//  по странной картинке на экране.
+//  Смещения выведены из правила "элемент не пересекает границу 16 байт".
+// ============================================================
+static_assert(sizeof(LightData) == 64, "LightData: 64 байта");
+static_assert(offsetof(LightingPassCB, Lights) == 32, "сдвинулся массив Lights");
+static_assert(offsetof(LightingPassCB, ShadowViewProj) == 1056, "сдвинулись матрицы каскадов");
+static_assert(offsetof(LightingPassCB, CascadeSplits) == 1312, "сдвинулись границы каскадов");
+static_assert(offsetof(LightingPassCB, CameraView) == 1328, "сдвинулась матрица вида");
+static_assert(offsetof(LightingPassCB, ShadowLightIndex) == 1392, "сдвинулся хвост");
+static_assert(sizeof(LightingPassCB) == 1408, "изменился размер LightingPassCB");
+
+static_assert(offsetof(ConstantBufferData, CameraPos) == 192, "ConstantBufferData: CameraPos");
+static_assert(offsetof(ConstantBufferData, BlendFactor) == 224, "ConstantBufferData: BlendFactor");
+static_assert(sizeof(ConstantBufferData) == 256, "изменился размер ConstantBufferData");

@@ -152,8 +152,9 @@ DSOutput DSMain(HSConstOutput hsConst,
 
     // Displacement: смещение вдоль нормали
     // SampleLevel(mip=0) обязателен в DS — градиентные инструкции недоступны
+    // 0.5 = нулевой уровень рельефа, смещение двустороннее
     float disp = gDispMap.SampleLevel(gSamplerDisp, uv, 0).r;
-    posWS += normalWS * (disp * DisplacementScale);
+    posWS += normalWS * ((disp - 0.5f) * 2.0f * DisplacementScale);
 
     o.PosWS    = posWS;
     o.Normal   = normalWS;
@@ -174,9 +175,10 @@ DSOutput DSMain(HSConstOutput hsConst,
 // ================================================================
 struct PSOutput
 {
-    float4 Albedo : SV_Target0;
-    float4 Normal : SV_Target1;
-    float4 PBR    : SV_Target2;
+    float4 Albedo   : SV_Target0;
+    float4 Normal   : SV_Target1;
+    float4 PBR      : SV_Target2;
+    float4 WorldPos : SV_Target3;   // <-- отсутствовал: lighting pass читает t3
 };
 
 PSOutput PSMain(DSOutput input)
@@ -196,16 +198,29 @@ PSOutput PSMain(DSOutput input)
     float2 duv1 = ddx(input.TexCoord);
     float2 duv2 = ddy(input.TexCoord);
 
-    float3 T = normalize(dp1 * duv2.y - dp2 * duv1.y);
-    float3 B = normalize(cross(N, T));
+    float3 Traw  = dp1 * duv2.y - dp2 * duv1.y;
+    float  Tlen2 = dot(Traw, Traw);
+    float3 T, B;
+    if (Tlen2 > 1e-12f)
+    {
+        T = normalize(Traw - N * dot(N, Traw * rsqrt(Tlen2)));
+        B = cross(N, T);
+    }
+    else
+    {
+        float3 up = abs(N.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0);
+        T = normalize(cross(up, N));
+        B = cross(N, T);
+    }
     float3x3 TBN = float3x3(T, B, N);
 
     float3 nmSample = gNormalMap.Sample(gSampler, input.TexCoord).rgb;
     float3 nmLocal  = nmSample * 2.0f - 1.0f;
     float3 nmWorld  = normalize(mul(nmLocal, TBN));
 
-    o.Normal = float4(nmWorld, 0.0f);
-    o.PBR    = float4(0.6f, 0.1f, 1.0f, 1.0f);
+    o.Normal   = float4(nmWorld, 0.0f);
+    o.PBR      = float4(0.6f, 0.1f, 1.0f, 1.0f);
+    o.WorldPos = float4(input.PosWS, 1.0f);
 
     return o;
 }

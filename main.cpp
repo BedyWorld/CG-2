@@ -29,7 +29,6 @@ LRESULT CALLBACK GameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_SIZE:
-        // Resize обрабатывается в Game::Update через rs_->Resize
         return 0;
 
     case WM_DESTROY:

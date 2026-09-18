@@ -19,21 +19,27 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Culling.cpp" />
     <ClCompile Include="Game.cpp" />
     <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="InputDevice.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="ObjLoader.cpp" />
+    <ClCompile Include="ParticleSystem.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
+    <ClCompile Include="ShadowMap.cpp" />
     <ClCompile Include="TextureLoader.cpp" />
     <ClCompile Include="Window.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Culling.h" />
     <ClInclude Include="Game.h" />
     <ClInclude Include="GBuffer.h" />
     <ClInclude Include="InputDevice.h" />
     <ClInclude Include="ObjLoader.h" />
+    <ClInclude Include="ParticleSystem.h" />
     <ClInclude Include="RenderingSystem.h" />
+    <ClInclude Include="ShadowMap.h" />
     <ClInclude Include="TextureLoader.h" />
     <ClInclude Include="Types.h" />
     <ClInclude Include="Utils.h" />
