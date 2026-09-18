@@ -3,18 +3,14 @@
 #include <DirectXMath.h>
 using namespace DirectX;
 
-// ---- Vertex (with UV) ----
 struct Vertex
 {
     XMFLOAT3 Position;  // 12
     XMFLOAT3 Normal;    // 12
     XMFLOAT4 Color;     // 16
-    XMFLOAT2 TexCoord;  // 8   -> total = 48 bytes
+    XMFLOAT2 TexCoord;  // 8
 };
 
-// ============================================================
-//  Структуры источников света
-// ============================================================
 
 enum class LightType : UINT
 {
@@ -37,7 +33,6 @@ struct LightData
 
 static const UINT MAX_LIGHTS = 16;
 
-// ---- Constant Buffer для Geometry Pass (с тесселяцией) ----
 struct ConstantBufferData
 {
     XMMATRIX World;             // 64
@@ -47,20 +42,17 @@ struct ConstantBufferData
     XMFLOAT2 Tiling;            //  8
     XMFLOAT2 UVOffset;          //  8
     float    BlendFactor;       //  4
-    // ---- тесселяция ----
+    //  тесселяция 
     float    TessNear;          //  4  — дистанция максимального уровня тесселяции
     float    TessFar;           //  4  — дистанция минимального уровня тесселяции
     float    TessMinLevel;      //  4  — мин. уровень (вдали)
     float    TessMaxLevel;      //  4  — макс. уровень (вблизи)
     float    DisplacementScale; //  4  — сила displacement
-    // Каркасный режим (клавиша G). Занят один float из бывшего Padding[2],
-    // поэтому размер структуры не изменился и проверки ниже остались верны.
     float    WireMode;          //  4  — >0.5 рисуем сетку самосветящейся
     float    Padding;           //  4
                                 // total = 256
 };
 
-// ---- Constant Buffer для Lighting Pass ----
 static const int MAX_CASCADES = 4;
 
 struct LightingPassCB
@@ -70,8 +62,7 @@ struct LightingPassCB
     XMFLOAT3 Padding0;
     LightData Lights[MAX_LIGHTS];
 
-    // ---- ДЗ №5: каскадные тени ----
-    // Смещения кратны 16 байтам, порядок обязан совпадать с cbuffer в HLSL.
+    //каскадные тени
     XMFLOAT4X4 ShadowViewProj[MAX_CASCADES];   // матрицы света по каскадам
     XMFLOAT4   CascadeSplits;                  // дальние границы во view-space
     XMFLOAT4X4 CameraView;                     // нужна для глубины в view-space
@@ -81,9 +72,6 @@ struct LightingPassCB
     float      DebugCascades;      // >0.5 — подкрасить каскады (клавиша V)
 };
 
-// ============================================================
-//  Световой снаряд
-// ============================================================
 struct LightBullet
 {
     XMFLOAT3 Position;
@@ -97,14 +85,6 @@ struct LightBullet
     float    StuckPosition[3];
 };
 
-// ============================================================
-//  Раскладка обязана совпадать с cbuffer в HLSL байт в байт.
-//  Проверки ниже ловят перестановку или вставку поля на этапе
-//  КОМПИЛЯЦИИ. Без них рассинхрон проходит молча: шейдер просто
-//  читает мусор со сдвинутых смещений, и искать это приходится
-//  по странной картинке на экране.
-//  Смещения выведены из правила "элемент не пересекает границу 16 байт".
-// ============================================================
 static_assert(sizeof(LightData) == 64, "LightData: 64 байта");
 static_assert(offsetof(LightingPassCB, Lights) == 32, "сдвинулся массив Lights");
 static_assert(offsetof(LightingPassCB, ShadowViewProj) == 1056, "сдвинулись матрицы каскадов");

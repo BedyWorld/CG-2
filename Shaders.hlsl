@@ -82,9 +82,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     // BlendFactor приходит из C++ кода и вычисляется на основе расстояния
     float4 texColor = lerp(texColor1, texColor2, BlendFactor);
     
-    // Для отладки: можно визуализировать расстояние цветом
-    // Закомментируйте следующую строку, если не нужно
-    // return float4(input.DistanceToCamera / 5.0f, 0, 1 - input.DistanceToCamera / 5.0f, 1);
     float3 ambient = texColor.rgb * 0.2;
     float3 diffuse = texColor.rgb * diff;
     float3 specular = spec * LightColor.rgb;

@@ -13,9 +13,6 @@ public:
 
     bool Initialize();
 
-    // Run the message loop.
-    // onUpdate(deltaTime) is called each frame before rendering.
-    // onRender() is called each frame to render.
     int Run(std::function<void(float)> onUpdate,
         std::function<void()>      onRender);
 
@@ -24,7 +21,6 @@ public:
     int          GetHeight()      const { return height_; }
     InputDevice* GetInputDevice() const { return input_.get(); }
 
-    // Called by Game on resize
     std::function<void(int, int)> OnResize;
 
 private:
