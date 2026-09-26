@@ -10,8 +10,8 @@ cbuffer CB : register(b0)
 
     float2 Tiling;
     float2 UVOffset;
-    float BlendFactor; // НОВЫЙ ПАРАМЕТР: 0 = texture2, 1 = texture3
-    float3 Padding; // выравнивание для 16-байтовой границы
+    float BlendFactor;
+    float3 Padding;
 };
 
 Texture2D gTexture : register(t0); // texture2 (дальняя)
@@ -52,11 +52,9 @@ PSInput VSMain(VSInput input)
     output.Normal = mul(float4(input.Normal, 0), World).xyz;
 
     output.Color = input.Color;
-
-    // ТЕКСТУРА + СМЕЩЕНИЕ
+    
     output.TexCoord = input.TexCoord * Tiling + UVOffset;
     
-    // Вычисляем расстояние от камеры до точки в мировых координатах
     float3 cameraToPoint = worldPos.xyz - CameraPos.xyz;
     output.DistanceToCamera = length(cameraToPoint);
 

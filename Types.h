@@ -11,6 +11,27 @@ struct Vertex
     XMFLOAT2 TexCoord;  // 8
 };
 
+static const int MAX_WATER_WAVES = 4;
+
+struct WaterCB
+{
+    XMMATRIX World;
+    XMMATRIX View;
+    XMMATRIX Proj;
+    XMFLOAT4 CameraPos;
+    XMFLOAT4 ShallowColor;
+    XMFLOAT4 DeepColor;
+    XMFLOAT4 WaveDirAmp[MAX_WATER_WAVES];
+    XMFLOAT4 WaveSpeed;
+    float    Time;
+    float    TessNear;
+    float    TessFar;
+    float    TessMinLevel;
+    float    TessMaxLevel;
+    float    Roughness;
+    int      WaveCount;
+    float    _pad;
+};
 
 enum class LightType : UINT
 {

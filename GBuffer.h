@@ -5,21 +5,6 @@
 
 using Microsoft::WRL::ComPtr;
 
-// ============================================================
-//  GBuffer — набор render target'ов для Deferred Rendering
-//
-//  RT0 (DXGI_FORMAT_R8G8B8A8_UNORM)        — Albedo (RGB) + unused (A)
-//  RT1 (DXGI_FORMAT_R16G16B16A16_FLOAT)    — Normal (RGB) в world space + unused (A)
-//  RT2 (DXGI_FORMAT_R8G8B8A8_UNORM)        — Roughness (R), Metallic (G), AO (B), unused (A)
-//  RT3 (DXGI_FORMAT_R32G32B32A32_FLOAT)    — WorldPos (XYZ) + unused (W)
-//  Depth (DXGI_FORMAT_D32_FLOAT)            — общий depth buffer
-//
-//  Схема дескрипторных слотов в общем SRV-хипе (GBuffer занимает слоты 4..7):
-//    slot 4 — Albedo SRV  (t0 в lighting)
-//    slot 5 — Normal SRV  (t1 в lighting)
-//    slot 6 — PBR SRV     (t2 в lighting)
-//    slot 7 — WorldPos SRV (t3 в lighting)
-// ============================================================
 
 static const UINT GBUFFER_RT_COUNT = 4;
 
@@ -32,10 +17,6 @@ public:
     GBuffer(const GBuffer&) = delete;
     GBuffer& operator=(const GBuffer&) = delete;
 
-    // Создаёт/пересоздаёт все текстуры и дескрипторы под новый размер.
-    // rtvHeapStart — начало RTV-хипа (GBuffer занимает слоты после swap chain RTV-ов).
-    // srvHeap      — shader-visible SRV-хип, GBuffer пишет в слоты [srvBaseSlot..+3).
-    // dsvHeapStart — DSV-хип (слот 0 уже занят основным depth; GBuffer использует его же).
     void Create(ID3D12Device* device,
         int width, int height,
         UINT rtvDescSize,
@@ -44,7 +25,6 @@ public:
         UINT srvBaseSlot,                          // первый свободный SRV-слот (4)
         D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle);    // shared depth
 
-    // Переводит RT-текстуры в нужное состояние.
     void TransitionTo(ID3D12GraphicsCommandList* cmd,
         D3D12_RESOURCE_STATES state);
 

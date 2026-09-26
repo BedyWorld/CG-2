@@ -9,10 +9,6 @@
 #include "TextureLoader.h"
 #include "Types.h"
 
-// MAX_LIGHTS (16) — жёсткий лимит GPU. Из них 8 занимают сцена,
-// поэтому снаряды+застрявшие огни физически не могут дать больше 8.
-// Держать 64 снаряда бессмысленно: они не светят, но каждый кадр
-// трассируются по мешу.
 static const int   MAX_BULLETS = 8;
 static const int   MAX_STUCK_LIGHTS = 6;
 static const int   SCENE_LIGHT_COUNT = 8;   // сколько слотов резервирует сцена
@@ -35,7 +31,6 @@ public:
 
     void ClearStuckLights();
 
-    // ---- ДЗ №4: переключатели отсечения ----
     void ToggleFrustumCulling() { frustumCullEnabled_ = !frustumCullEnabled_; }
     void ToggleOctreeCulling() { octreeCullEnabled_ = !octreeCullEnabled_; }
     void OnShoot();
@@ -45,7 +40,6 @@ public:
 
     void SetMeshForRaycast(const std::vector<Vertex>& verts, const std::vector<UINT>& idxs);
 
-    // ---- ДЗ №4: разбросанные по сцене объекты ----
     static const int SCENE_OBJECT_COUNT = 300;
 
     void  BuildSceneObjects();      // расстановка + построение октодерева
@@ -87,7 +81,6 @@ public:
     bool  wireframe_ = false;   // клавиша G — каркасный режим
     int   debugMode_ = 0;      // клавиша V: 0 выкл, 1 каскады, 2 карта теней
 
-    // ---- ДЗ №5 ----
     void     RenderShadowCascades();
     XMFLOAT3 sunDir_ = { 0,-1,0 };   // направление источника, отбрасывающего тени
     int      sunLightIndex_ = -1;    // его индекс в массиве Lights
@@ -95,6 +88,12 @@ public:
     int   statNodesVisited_ = 0;
     float statCullMs_ = 0.0f;
     float titleTimer_ = 0.0f;
+
+    void BuildWaterPlane();
+    WaterCB waterCB_ = {};
+    bool    waterEnabled_ = true;
+    float   waterHeight_ = 9.5f;
+    float waterAmpScale_ = 1.0f;
 
 private:
     void LoadSceneGeometry();      // Sponza — загрузка меша + текстур через BuildMesh1
@@ -105,10 +104,6 @@ private:
     static bool RayTriangle(XMFLOAT3 orig, XMFLOAT3 dir,
         XMFLOAT3 v0, XMFLOAT3 v1, XMFLOAT3 v2, float& t);
 
-    // ---- BVH для ускорения трассировки ----
-    // Без него RaycastMesh перебирал ВСЕ треугольники меша для каждого
-    // снаряда каждый кадр (Sponza ~260k тр. x N снарядов = миллионы
-    // тестов/кадр на одном ядре). BVH строится один раз при загрузке.
     struct BVHNode
     {
         XMFLOAT3 bmin;

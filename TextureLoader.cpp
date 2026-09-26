@@ -34,11 +34,6 @@ TextureData LoadTextureWIC(const std::wstring& path)
     return td;
 }
 
-//  TGA loader (нативный, без зависимостей)
-//  Поддерживает:
-//    type 2  — uncompressed RGB/RGBA
-//    type 3  — uncompressed grayscale
-//    type 10 — RLE RGB/RGBA
 TextureData LoadTextureTGA(const std::wstring& path)
 {
     TextureData td;
@@ -202,15 +197,6 @@ TextureData CreateCheckerboard(UINT size, UINT tileSize)
     return CreateSolidColor(180, 180, 180, 255, 4);
 }
 
-//  Восстановление карты высот из карты нормалей
-//
-//  Нормаль тангенс-пространства (nx, ny, nz) задаёт наклон поверхности:
-//      dh/du = -nx/nz,   dh/dv = -ny/nz
-//  Само поле высот получается интегрированием этого градиента. Прямого
-//  интегрирования недостаточно (градиент зашумлён и не консервативен),
-//  поэтому решаем уравнение Пуассона  Lap(h) = div(g)  в смысле
-//  наименьших квадратов — методом Гаусса-Зейделя с красно-чёрным обходом.
-//  Границы заворачиваются: тайловые текстуры периодичны.
 TextureData CreateHeightFromNormal(const TextureData& nm, UINT outSize, int iterations)
 {
     TextureData out;

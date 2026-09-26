@@ -24,9 +24,6 @@ using Microsoft::WRL::ComPtr;
 
 static const UINT RS_FRAME_COUNT = 2;
 
-// ============================================================
-//  SubDrawCall — один draw call для geometry pass
-// ============================================================
 struct SubDrawCall
 {
     UINT indexStart = 0;
@@ -36,31 +33,6 @@ struct SubDrawCall
     int  srvDisp = 0;   // SRV-слот displacement/height  (t3)
 };
 
-// ============================================================
-//  SRV-хип раскладка (256 слотов достаточно):
-//    slot 0          — fallback albedo (серый 200,200,200)
-//    slot 1          — fallback normal (flat 128,128,255)
-//    slot 2          — fallback disp   (нейтральный 128)
-//    slot 3          — albedo2 общий   (для blending)
-//    slot 4..7       — GBuffer (Albedo, Normal, PBR, WorldPos)
-//    slot 8+         — уникальные текстуры (кэшируются по пути)
-//
-//  Root Signature geometry pass (5 параметров):
-//    param[0] = CBV  b0           — ConstantBufferData
-//    param[1] = SRV  t0 (inline)  — diffuse текущего материала
-//    param[2] = SRV  t1 (inline)  — albedo2 (общий, slot 3)
-//    param[3] = SRV  t2 (inline)  — normal map
-//    param[4] = SRV  t3 (inline)  — displacement (общий, slot 2)
-//  Inline SRV не требуют блоков подряд — каждый указывается
-//  отдельным SetGraphicsRootShaderResourceView(slot, gpuVA).
-//  НО: inline SRV требует буфер (не текстуру) либо DescriptorTable.
-//  Используем DescriptorTable по 1 дескриптору каждый:
-//    param[1] = DescriptorTable { range: 1 SRV t0 }
-//    param[2] = DescriptorTable { range: 1 SRV t1 }
-//    param[3] = DescriptorTable { range: 1 SRV t2 }
-//    param[4] = DescriptorTable { range: 1 SRV t3 }
-//  Тогда SetGraphicsRootDescriptorTable(N, gpuHandle) на каждый слот.
-// ============================================================
 
 class RenderingSystem
 {
@@ -77,7 +49,13 @@ public:
     void EndResourceUpload();
     void ReleaseTextureUploadBuffers();
 
-    // ---- Геометрия ----
+    void BuildWater(const std::vector<Vertex>& verts, const std::vector<UINT>& idxs);
+    void UpdateWaterCB(const WaterCB& data);
+    void BindWaterPass();
+    void DrawWater();
+    bool HasWater() const { return indexCountWater_ > 0; }
+
+    
     void BuildMesh1(const std::vector<Vertex>& verts,
         const std::vector<UINT>& idxs,
         const std::vector<UINT>& subIndexStarts,
@@ -108,27 +86,22 @@ public:
     // ---- Кадр ----
     ID3D12GraphicsCommandList* BeginFrame();
 
-    // ---- ДЗ №4: инстансинг разбросанных объектов ----
-    // Все видимые копии mesh2 рисуются одним DrawIndexedInstanced.
-    // Матрицы приходят структурированным буфером и читаются в VS по
-    // SV_InstanceID, поэтому число объектов не увеличивает число draw call.
+    //инстансинг разбросанных объектов
     static const UINT RS_MAX_INSTANCES = 20000;
     void UpdateInstances(const std::vector<XMFLOAT4X4>& visible,
         const std::vector<XMFLOAT4X4>& all);
     void BindInstancedPass();
     void DrawInstances(UINT instanceCount);
 
-    // ---- ДЗ №5: каскадные карты теней ----
+    //каскадные карты теней
     CascadedShadowMap& Shadows() { return shadows_; }
     void BeginShadowCascade(int cascade, const XMFLOAT4X4& lightViewProj);
-    void DrawShadowMesh1();                       // Sponza одним вызовом
-    // Только перечисленные субмеши: дороже по draw call'ам, но дешевле
-    // по геометрии, когда каскад покрывает малую часть сцены.
+    void DrawShadowMesh1();                    
     void DrawShadowMesh1Sub(const std::vector<int>& visible);
     void DrawShadowInstances(UINT instanceCount); // разбросанные объекты
     void EndShadowPass();
 
-    // ---- ДЗ №6: система частиц ----
+    // система частиц
     ParticleSystem& Particles() { return particles_; }
     void SimulateParticles(const ParticleCB& cb);
     void DrawParticles();
@@ -160,6 +133,8 @@ public:
     bool HasMesh2()  const { return indexCount2_ > 0; }
 
 private:
+    void CreateWaterPassRootSignature();
+    void CreateWaterPSO();
     void CreateDevice();
     void CreateCommandQueue();
     void CreateSwapChain();
@@ -227,6 +202,17 @@ private:
     ComPtr<ID3D12CommandAllocator>    commandAllocators_[RS_FRAME_COUNT];
     ComPtr<ID3D12GraphicsCommandList> commandList_;
 
+    ComPtr<ID3D12Resource>            waterVB_, waterIB_;
+    D3D12_VERTEX_BUFFER_VIEW          vbViewWater_ = {};
+    D3D12_INDEX_BUFFER_VIEW           ibViewWater_ = {};
+    UINT                              indexCountWater_ = 0;
+    ComPtr<ID3D12RootSignature>       waterRootSig_;
+    ComPtr<ID3D12PipelineState>       waterPSO_;
+    ComPtr<ID3D12Resource>            waterCB_;
+    BYTE* waterCBMapped_ = nullptr;
+    UINT64                            waterCBStride_ = 0;
+
+
     ComPtr<ID3D12RootSignature>       geometryRootSig_;
     ComPtr<ID3D12PipelineState>       geometryPSO_;
     // Тот же конвейер, отличается только FillMode. Отдельный PSO нужен
@@ -236,7 +222,6 @@ private:
     // через HS/DS бессмысленно дорого, а рельеф на них не нужен.
     ComPtr<ID3D12PipelineState>       instancedPSO_;
 
-    // ---- ДЗ №5 ----
     CascadedShadowMap                 shadows_;
     ParticleSystem                    particles_;
     static const int SRV_PARTICLES = 9;   // блок из 7 слотов
@@ -285,12 +270,6 @@ private:
     // Кэш путь -> SRV слот
     std::unordered_map<std::wstring, int> texCache_;
 
-    // ---- CB ----
-    // ---- Constant buffers ----
-    // Каждый CB выделен как кольцо из RS_FRAME_COUNT выровненных блоков.
-    // CPU опережает GPU на кадр (см. MoveToNextFrame), поэтому запись в
-    // один-единственный буфер затирала данные, которые GPU ещё читает,
-    // — отсюда дёрганье матриц и мерцание освещения.
     ComPtr<ID3D12Resource>            geometryCB_;
     BYTE* geometryCBMapped_ = nullptr;
     UINT64                            geometryCBStride_ = 0;

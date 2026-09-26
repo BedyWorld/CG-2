@@ -15,7 +15,6 @@ struct TextureData
     bool valid  = false;
 };
 
-// Загрузить PNG/JPG/BMP через WIC
 TextureData LoadTextureWIC(const std::wstring& path);
 
 // Загрузить TGA нативным парсером (WIC не поддерживает TGA без кодека)

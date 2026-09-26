@@ -2,42 +2,24 @@
 #include <cmath>
 #include <algorithm>
 
-// ============================================================
-//  Извлечение плоскостей фрустума
-//
-//  Точка внутри фрустума удовлетворяет -w < x' < w и т.д., где
-//  (x',y',z',w') = v * VP. Расписав эти неравенства покомпонентно,
-//  получаем плоскости как комбинации столбцов VP. Для DirectX
-//  ближняя плоскость даёт 0 < z' (диапазон глубины [0,1]),
-//  а не -w < z' как в OpenGL — отсюда несимметричность near/far.
-// ============================================================
 Frustum Frustum::FromViewProj(const XMFLOAT4X4& m)
 {
     Frustum f;
 
-    // столбец i матрицы: m(0,i), m(1,i), m(2,i), m(3,i)
     auto col = [&m](int i, int j) { return m.m[i][j]; };
 
-    // left: w' + x' > 0
     f.Planes[0] = { col(0,3) + col(0,0), col(1,3) + col(1,0),
                     col(2,3) + col(2,0), col(3,3) + col(3,0) };
-    // right: w' - x' > 0
     f.Planes[1] = { col(0,3) - col(0,0), col(1,3) - col(1,0),
                     col(2,3) - col(2,0), col(3,3) - col(3,0) };
-    // bottom: w' + y' > 0
     f.Planes[2] = { col(0,3) + col(0,1), col(1,3) + col(1,1),
                     col(2,3) + col(2,1), col(3,3) + col(3,1) };
-    // top: w' - y' > 0
     f.Planes[3] = { col(0,3) - col(0,1), col(1,3) - col(1,1),
                     col(2,3) - col(2,1), col(3,3) - col(3,1) };
-    // near: z' > 0   (диапазон глубины D3D — [0,1])
     f.Planes[4] = { col(0,2), col(1,2), col(2,2), col(3,2) };
-    // far: w' - z' > 0
     f.Planes[5] = { col(0,3) - col(0,2), col(1,3) - col(1,2),
                     col(2,3) - col(2,2), col(3,3) - col(3,2) };
 
-    // Нормализация: без неё расстояние до плоскости масштабировано,
-    // и тест "центр ± радиус" перестаёт быть корректным.
     for (int i = 0; i < 6; ++i)
     {
         Plane& p = f.Planes[i];
@@ -51,8 +33,6 @@ Frustum Frustum::FromViewProj(const XMFLOAT4X4& m)
     return f;
 }
 
-// Знаковое расстояние от центра коробки до плоскости и проекция
-// полуразмера на нормаль плоскости.
 static inline void PlaneDistances(const Plane& p, const AABB& box,
     float& dist, float& radius)
 {
@@ -62,10 +42,6 @@ static inline void PlaneDistances(const Plane& p, const AABB& box,
     radius = fabsf(p.a) * e.x + fabsf(p.b) * e.y + fabsf(p.c) * e.z;
 }
 
-// Допуск на погрешность float. На дальней плоскости при дальности ~100
-// единиц расхождение достигает единиц миллиметров — без запаса объекты
-// на самой границе начинают мигать между кадрами. Смещаем в сторону
-// "лучше нарисовать лишнее, чем пропустить".
 static const float kCullEpsilon = 1e-2f;
 
 bool Frustum::Intersects(const AABB& box) const
@@ -74,7 +50,6 @@ bool Frustum::Intersects(const AABB& box) const
     {
         float dist, radius;
         PlaneDistances(Planes[i], box, dist, radius);
-        // Коробка целиком по отрицательную сторону хотя бы одной плоскости
         if (dist + radius < -kCullEpsilon) return false;
     }
     return true;
@@ -86,16 +61,11 @@ bool Frustum::Contains(const AABB& box) const
     {
         float dist, radius;
         PlaneDistances(Planes[i], box, dist, radius);
-        // Здесь запас в обратную сторону: сомнительный узел лучше разобрать
-        // по объектам, чем целиком принять как видимый.
-        if (dist - radius < kCullEpsilon) return false;   // пересекает плоскость
+        if (dist - radius < kCullEpsilon) return false;
     }
     return true;
 }
 
-// ============================================================
-//  Октодерево
-// ============================================================
 void Octree::Build(const std::vector<AABB>& bounds, int maxDepth, int minObjects)
 {
     nodes_.clear();
@@ -104,7 +74,6 @@ void Octree::Build(const std::vector<AABB>& bounds, int maxDepth, int minObjects
     lastVisited_ = 0;
     if (bounds_.empty()) return;
 
-    // Корневой объём — общий AABB сцены
     AABB root = bounds_[0];
     for (const AABB& b : bounds_)
     {
@@ -115,8 +84,6 @@ void Octree::Build(const std::vector<AABB>& bounds, int maxDepth, int minObjects
         root.Max.y = std::max(root.Max.y, b.Max.y);
         root.Max.z = std::max(root.Max.z, b.Max.z);
     }
-    // Небольшой запас, чтобы объекты на самой границе гарантированно
-    // считались содержащимися
     const float pad = 1e-3f;
     root.Min.x -= pad; root.Min.y -= pad; root.Min.z -= pad;
     root.Max.x += pad; root.Max.y += pad; root.Max.z += pad;
@@ -144,7 +111,6 @@ int Octree::BuildNode(const AABB& box, std::vector<int>& items, int depth,
 
     const XMFLOAT3 c = box.Center();
 
-    // Восемь дочерних объёмов
     AABB childBox[8];
     for (int i = 0; i < 8; ++i)
     {
@@ -156,9 +122,6 @@ int Octree::BuildNode(const AABB& box, std::vector<int>& items, int depth,
         childBox[i].Max.z = (i & 4) ? box.Max.z : c.z;
     }
 
-    // Объект уходит вниз только если ЦЕЛИКОМ помещается в один октант.
-    // Пересекающие границу остаются здесь — так индекс встречается
-    // ровно один раз во всём дереве.
     std::vector<int> childItems[8];
     std::vector<int> stay;
     for (int objIdx : items)
@@ -180,8 +143,6 @@ int Octree::BuildNode(const AABB& box, std::vector<int>& items, int depth,
         else             stay.push_back(objIdx);
     }
 
-    // Если разбиение ничего не дало — оставляем лист, иначе уйдём в
-    // бесконечную рекурсию на совпадающих объектах.
     bool anyChild = false;
     for (int k = 0; k < 8; ++k) if (!childItems[k].empty()) { anyChild = true; break; }
     if (!anyChild)
@@ -196,7 +157,6 @@ int Octree::BuildNode(const AABB& box, std::vector<int>& items, int depth,
         if (childItems[k].empty()) continue;
         const int childIdx = BuildNode(childBox[k], childItems[k], depth + 1,
             maxDepth, minObjects);
-        // ВАЖНО: nodes_ мог перевыделиться внутри рекурсии — пишем по индексу
         nodes_[idx].child[k] = childIdx;
     }
     return idx;
@@ -215,11 +175,10 @@ void Octree::QueryNode(int nodeIdx, const Frustum& frustum, std::vector<int>& ou
     const Node& node = nodes_[nodeIdx];
     ++lastVisited_;
 
-    if (!frustum.Intersects(node.bounds)) return;   // всё поддерево снаружи
+    if (!frustum.Intersects(node.bounds)) return;
 
     if (frustum.Contains(node.bounds))
     {
-        // Узел целиком внутри — принимаем поддерево без проверок плоскостей
         CollectSubtree(nodeIdx, out);
         return;
     }

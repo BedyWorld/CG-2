@@ -1,28 +1,3 @@
-// ================================================================
-//  GBufferShaders.hlsl — Geometry Pass с тесселяцией и Normal Map
-//
-//  Записывает в GBuffer:
-//    RT0 (R8G8B8A8_UNORM)      — Albedo.rgb (lerp двух текстур)
-//    RT1 (R16G16B16A16_FLOAT)  — Normal в world space (из normal map)
-//    RT2 (R8G8B8A8_UNORM)      — Roughness(R), Metallic(G), AO(B)
-//
-//  Стадии:
-//    VS  — world-space transform, передаёт HSInput в Hull Shader
-//    HS  — адаптивный TessFactor по расстоянию до камеры
-//    DS  — барицентрическая интерполяция + displacement по нормали
-//    PS  — normal map через TBN (ddx/ddy), MRT запись
-//
-//  Текстурные регистры:
-//    t0 = gAlbedo1     (основная диффузная текстура)
-//    t1 = gAlbedo2     (вторичная, blending по BlendFactor)
-//    t2 = gNormalMap   (tangent-space normal map)
-//    t3 = gDispMap     (displacement / height map, R-канал)
-//
-//  Сэмплеры:
-//    s0 = wrap linear  (albedo, normal)
-//    s1 = wrap linear  (displacement, SampleLevel в DS)
-// ================================================================
-
 cbuffer GeometryCB : register(b0)
 {
     matrix   World;
@@ -32,11 +7,11 @@ cbuffer GeometryCB : register(b0)
     float2   Tiling;
     float2   UVOffset;
     float    BlendFactor;
-    float    TessNear;          // дистанция максимального уровня тесселяции
-    float    TessFar;           // дистанция минимального уровня тесселяции
-    float    TessMinLevel;      // мин. TessFactor (вдали)
-    float    TessMaxLevel;      // макс. TessFactor (вблизи)
-    float    DisplacementScale; // амплитуда смещения вдоль нормали
+    float    TessNear;
+    float    TessFar;
+    float    TessMinLevel;
+    float    TessMaxLevel;
+    float    DisplacementScale;
     float2   CBPad;
 };
 
@@ -47,11 +22,6 @@ Texture2D    gDispMap    : register(t3);
 SamplerState gSampler    : register(s0);
 SamplerState gSamplerDisp: register(s1);
 
-// ================================================================
-//  Vertex Shader
-//  Преобразует вершину в world-space и передаёт в HS.
-//  Матрицы View/Proj применяются в DS после displacement.
-// ================================================================
 struct VSInput
 {
     float3 Pos      : POSITION;
@@ -73,18 +43,10 @@ HSInput VSMain(VSInput input)
     float4 wp  = mul(float4(input.Pos, 1.0f), World);
     o.PosWS    = wp.xyz;
     o.Normal   = normalize(mul(float4(input.Normal, 0.0f), World).xyz);
-    // UV передаём без изменений — смещение применяется в PS при сэмплировании
     o.TexCoord = input.TexCoord;
     return o;
 }
 
-// ================================================================
-//  Hull Shader
-//  Константная функция патча вычисляет адаптивный TessFactor:
-//    - Считаем расстояние от центра каждого ребра до камеры
-//    - Линейно интерполируем между TessMaxLevel и TessMinLevel
-//      по диапазону [TessNear, TessFar]
-// ================================================================
 struct HSConstOutput
 {
     float EdgeTess[3]   : SV_TessFactor;
@@ -101,7 +63,6 @@ float DistanceTessFactor(float3 posWS)
 HSConstOutput HSConst(InputPatch<HSInput, 3> patch, uint pid : SV_PrimitiveID)
 {
     HSConstOutput o;
-    // TessFactor ребра = среднее двух угловых вершин
     o.EdgeTess[0]  = (DistanceTessFactor(patch[1].PosWS) + DistanceTessFactor(patch[2].PosWS)) * 0.5f;
     o.EdgeTess[1]  = (DistanceTessFactor(patch[2].PosWS) + DistanceTessFactor(patch[0].PosWS)) * 0.5f;
     o.EdgeTess[2]  = (DistanceTessFactor(patch[0].PosWS) + DistanceTessFactor(patch[1].PosWS)) * 0.5f;
@@ -122,12 +83,7 @@ HSInput HSMain(InputPatch<HSInput, 3> patch,
     return patch[i];
 }
 
-// ================================================================
 //  Domain Shader
-//  1. Барицентрически интерполирует PosWS, Normal, TexCoord
-//  2. Читает displacement map и смещает позицию вдоль нормали
-//  3. Применяет View * Proj к финальной позиции
-// ================================================================
 struct DSOutput
 {
     float4 Pos      : SV_POSITION;
@@ -149,10 +105,7 @@ DSOutput DSMain(HSConstOutput hsConst,
     float2 uv       = patch[0].TexCoord * bary.x + patch[1].TexCoord * bary.y + patch[2].TexCoord * bary.z;
 
     normalWS = normalize(normalWS);
-
-    // Displacement: смещение вдоль нормали
-    // SampleLevel(mip=0) обязателен в DS — градиентные инструкции недоступны
-    // 0.5 = нулевой уровень рельефа, смещение двустороннее
+    
     float disp = gDispMap.SampleLevel(gSamplerDisp, uv, 0).r;
     posWS += normalWS * ((disp - 0.5f) * 2.0f * DisplacementScale);
 
@@ -163,29 +116,18 @@ DSOutput DSMain(HSConstOutput hsConst,
     return o;
 }
 
-// ================================================================
-//  Pixel Shader — MRT GBuffer
-//
-//  Normal map:
-//    - Строим TBN-фрейм из экранных производных (ddx/ddy)
-//      позиции и UV — это точнее, чем передавать T/B из VS,
-//      так как tessellation меняет геометрию
-//    - Декодируем tangent-space нормаль из [0,1] → [-1,1]
-//    - Трансформируем в world space через TBN
-// ================================================================
 struct PSOutput
 {
     float4 Albedo   : SV_Target0;
     float4 Normal   : SV_Target1;
     float4 PBR      : SV_Target2;
-    float4 WorldPos : SV_Target3;   // <-- отсутствовал: lighting pass читает t3
+    float4 WorldPos : SV_Target3;
 };
 
 PSOutput PSMain(DSOutput input)
 {
     PSOutput o;
-
-    // Смещение только при сэмплировании — UV модели не трогаем
+    
     float2 uvAnim = input.TexCoord + UVOffset;
 
     float4 tex1 = gAlbedo1.Sample(gSampler, uvAnim);

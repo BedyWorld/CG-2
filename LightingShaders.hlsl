@@ -1,17 +1,3 @@
-//  LightingShaders.hlsl — Lighting Pass (Deferred Rendering)
-//
-//  Читает GBuffer и вычисляет финальный цвет пикселя.
-//
-//  Поддерживаемые типы источников света:
-//    0 = Directional  — бесконечно далёкий параллельный свет
-//    1 = Point        — точечный свет с затуханием 1/(d² + ε)
-//    2 = Spot         — конический свет с плавным penumbra
-//
-//  GBuffer layout:
-//    t0 — Albedo  (R8G8B8A8_UNORM)      rgb=albedo
-//    t1 — Normal  (R16G16B16A16_FLOAT)  rgb=world-space normal
-//    t2 — PBR     (R8G8B8A8_UNORM)      r=roughness, g=metallic, b=ao
-
 #define MAX_LIGHTS 16
 #define LIGHT_DIRECTIONAL 0
 #define LIGHT_POINT       1

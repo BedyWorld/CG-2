@@ -1,9 +1,6 @@
 #include "Window.h"
 #include <stdexcept>
 
-// ============================================================
-//  Constructor / Destructor
-// ============================================================
 Window::Window(HINSTANCE hInstance, int width, int height, const std::wstring& title)
     : hInstance_(hInstance), width_(width), height_(height), title_(title)
 {
@@ -15,9 +12,6 @@ Window::~Window()
         DestroyWindow(hwnd_);
 }
 
-// ============================================================
-//  Initialize
-// ============================================================
 bool Window::Initialize()
 {
     // Register window class
@@ -32,7 +26,6 @@ bool Window::Initialize()
     if (!RegisterClassExW(&wc))
         return false;
 
-    // Calculate window rect for desired client area
     RECT rc = { 0, 0, width_, height_ };
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
 
@@ -62,9 +55,6 @@ bool Window::Initialize()
     return true;
 }
 
-// ============================================================
-//  Run (message + game loop)
-// ============================================================
 int Window::Run(std::function<void(float)> onUpdate,
                 std::function<void()>      onRender)
 {
@@ -93,9 +83,6 @@ int Window::Run(std::function<void(float)> onUpdate,
     }
 }
 
-// ============================================================
-//  Static WndProc  (routes messages to the instance)
-// ============================================================
 LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg,
                                   WPARAM wParam, LPARAM lParam)
 {
@@ -120,9 +107,6 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg,
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-// ============================================================
-//  Instance message handler
-// ============================================================
 LRESULT Window::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)

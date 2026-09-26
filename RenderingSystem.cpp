@@ -9,14 +9,6 @@ RenderingSystem::RenderingSystem(HWND hwnd, int width, int height)
 {
     for (UINT i = 0; i < RS_FRAME_COUNT; ++i)
         fenceValues_[i] = 0;
-    // Карта SRV-хипа:
-    //   0..3   fallback и общие текстуры
-    //   4..7   G-buffer (заполняет gbuffer_.Create)
-    //   8      массив каскадных теней (ДЗ №5)
-    //   9..15  система частиц (ДЗ №6)
-    //   16+    динамические текстуры материалов
-    // Резерв обязан стоять здесь: текстуры материалов грузятся раньше,
-    // чем создаются тени и частицы, и иначе заняли бы их слоты.
     srvNextFree_ = 16;
 }
 
@@ -48,6 +40,8 @@ void RenderingSystem::Initialize()
     CreateShadowPassRootSignature();
     CreateShadowPSOs();
     CreateLightingPassPSO();
+    CreateWaterPassRootSignature();
+    CreateWaterPSO();
 }
 
 void RenderingSystem::BeginResourceUpload()
@@ -55,7 +49,6 @@ void RenderingSystem::BeginResourceUpload()
     ThrowIfFailed(commandAllocators_[0]->Reset());
     ThrowIfFailed(commandList_->Reset(commandAllocators_[0].Get(), nullptr));
 
-    // Загружаем зарезервированные fallback-текстуры в слоты 0..3
     auto UploadReserved = [&](const TextureData& td, int slot)
         {
             D3D12_HEAP_PROPERTIES defHP = {}; defHP.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -131,9 +124,6 @@ void RenderingSystem::ReleaseTextureUploadBuffers()
     texUploads_.clear();
 }
 
-// ============================================================
-//  Device / swapchain / heaps
-// ============================================================
 void RenderingSystem::CreateDevice()
 {
 #ifdef _DEBUG
@@ -253,35 +243,20 @@ void RenderingSystem::CreateFence()
     if (!fenceEvent_) ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
 }
 
-// ============================================================
-//  Root Signatures
-//  Geometry pass — 5 параметров:
-//    [0] CBV b0
-//    [1] DescriptorTable 1×SRV t0  — diffuse
-//    [2] DescriptorTable 1×SRV t1  — albedo2
-//    [3] DescriptorTable 1×SRV t2  — normal
-//    [4] DescriptorTable 1×SRV t3  — displacement
-//  Каждый DescriptorTable указывает на отдельный SRV-слот
-//  без требования непрерывного расположения.
-// ============================================================
 void RenderingSystem::CreateGeometryPassRootSignature()
 {
-    // params[5] — инлайн-SRV с матрицами инстансов (ДЗ №4).
-    // Инлайн-дескриптор допустим, потому что это буфер, а не текстура.
     D3D12_ROOT_PARAMETER params[6] = {};
 
-    // param[0] — CBV
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    // params[1..4] — по одному SRV каждый
     D3D12_DESCRIPTOR_RANGE ranges[4] = {};
     for (int i = 0; i < 4; ++i)
     {
         ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         ranges[i].NumDescriptors = 1;
-        ranges[i].BaseShaderRegister = (UINT)i; // t0, t1, t2, t3
+        ranges[i].BaseShaderRegister = (UINT)i;
         ranges[i].OffsetInDescriptorsFromTableStart = 0;
 
         params[1 + i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -291,7 +266,7 @@ void RenderingSystem::CreateGeometryPassRootSignature()
     }
 
     params[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[5].Descriptor.ShaderRegister = 4;               // t4
+    params[5].Descriptor.ShaderRegister = 4;
     params[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
     D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
@@ -316,7 +291,6 @@ void RenderingSystem::CreateGeometryPassRootSignature()
 
 void RenderingSystem::CreateLightingPassRootSignature()
 {
-    // params[2] — массив каскадных теней (ДЗ №5)
     D3D12_ROOT_PARAMETER params[3] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
@@ -344,9 +318,6 @@ void RenderingSystem::CreateLightingPassRootSignature()
     samplers[0].MaxLOD = 0.0f; samplers[0].ShaderRegister = 0;
     samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    // Сравнивающий сэмплер для PCF: COMPARISON_MIN_MAG_LINEAR_MIP_POINT
-    // даёт билинейную интерполяцию РЕЗУЛЬТАТА сравнения, поэтому каждый
-    // из 25 тапов уже сглажен, и край тени получается мягким.
     samplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
     samplers[1].AddressU = samplers[1].AddressV = samplers[1].AddressW =
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -365,9 +336,6 @@ void RenderingSystem::CreateLightingPassRootSignature()
         sig->GetBufferSize(), IID_PPV_ARGS(&lightingRootSig_)));
 }
 
-// ============================================================
-//  Shader compiler
-// ============================================================
 ComPtr<ID3DBlob> RenderingSystem::CompileShader(const std::string& source,
     const std::string& entry, const std::string& target)
 {
@@ -388,9 +356,6 @@ ComPtr<ID3DBlob> RenderingSystem::CompileShader(const std::string& source,
     return blob;
 }
 
-// ============================================================
-//  Geometry Pass PSO
-// ============================================================
 static const char* kGBufferShaderSrc = R"HLSL(
 cbuffer GeometryCB : register(b0)
 {
@@ -526,7 +491,114 @@ PSOut PSMain(DSOut i)
     return o;
 }
 )HLSL";
+static const char* kWaterShaderSrc = R"HLSL(
+#define MAX_WATER_WAVES 4
+cbuffer WaterCB : register(b0)
+{
+    matrix World; matrix View; matrix Proj;
+    float4 CameraPos;
+    float4 ShallowColor;
+    float4 DeepColor;
+    float4 WaveDirAmp[MAX_WATER_WAVES];
+    float4 WaveSpeed;
+    float  Time;
+    float  TessNear; float TessFar;
+    float  TessMinLevel; float TessMaxLevel;
+    float  Roughness;
+    int    WaveCount;
+    float  _pad;
+};
 
+struct VSInput { float3 Pos:POSITION; float3 Normal:NORMAL; float4 Color:COLOR; float2 TexCoord:TEXCOORD0; };
+struct HSInput { float3 PosWS:POSITION; float2 UV:TEXCOORD0; };
+
+HSInput VSMain(VSInput i)
+{
+    HSInput o;
+    o.PosWS = mul(float4(i.Pos,1), World).xyz;
+    o.UV    = i.TexCoord;
+    return o;
+}
+
+float DistTess(float3 p)
+{
+    float d = distance(p, CameraPos.xyz);
+    return lerp(TessMaxLevel, TessMinLevel, saturate((d - TessNear)/(TessFar - TessNear)));
+}
+
+struct HSConstOut { float EdgeTess[3]:SV_TessFactor; float InsideTess[1]:SV_InsideTessFactor; };
+
+HSConstOut HSConst(InputPatch<HSInput,3> p, uint pid:SV_PrimitiveID)
+{
+    HSConstOut o;
+    o.EdgeTess[0]=(DistTess(p[1].PosWS)+DistTess(p[2].PosWS))*.5f;
+    o.EdgeTess[1]=(DistTess(p[2].PosWS)+DistTess(p[0].PosWS))*.5f;
+    o.EdgeTess[2]=(DistTess(p[0].PosWS)+DistTess(p[1].PosWS))*.5f;
+    o.InsideTess[0]=(o.EdgeTess[0]+o.EdgeTess[1]+o.EdgeTess[2])/3.f;
+    return o;
+}
+
+[domain("tri")][partitioning("fractional_odd")][outputtopology("triangle_cw")]
+[outputcontrolpoints(3)][patchconstantfunc("HSConst")][maxtessfactor(32.0f)]
+HSInput HSMain(InputPatch<HSInput,3> p, uint i:SV_OutputControlPointID, uint pid:SV_PrimitiveID)
+{
+    return p[i];
+}
+
+void EvalWave(float2 xz, out float height, out float2 grad)
+{
+    height = 0.0f; grad = float2(0,0);
+    [unroll]
+    for (int k = 0; k < MAX_WATER_WAVES; ++k)
+    {
+        if (k >= WaveCount) break;
+        float2 dir  = WaveDirAmp[k].xy;
+        float  amp  = WaveDirAmp[k].z;
+        float  freq = WaveDirAmp[k].w;
+        float  spd  = WaveSpeed[k];
+        float  phase = dot(dir, xz) * freq + Time * spd;
+        height += amp * sin(phase);
+        grad   += (amp * freq * cos(phase)) * dir;
+    }
+}
+
+struct DSOut { float4 Pos:SV_POSITION; float3 PosWS:TEXCOORD0; float3 Normal:TEXCOORD1; float2 UV:TEXCOORD2; };
+
+[domain("tri")]
+DSOut DSMain(HSConstOut hsc, float3 b:SV_DomainLocation, const OutputPatch<HSInput,3> p)
+{
+    DSOut o;
+    float3 pos = p[0].PosWS*b.x + p[1].PosWS*b.y + p[2].PosWS*b.z;
+    float2 uv  = p[0].UV*b.x    + p[1].UV*b.y    + p[2].UV*b.z;
+
+    float h; float2 grad;
+    EvalWave(pos.xz, h, grad);
+    pos.y += h;
+
+    float3 n = normalize(float3(-grad.x, 1.0f, -grad.y));
+
+    o.PosWS = pos; o.Normal = n; o.UV = uv;
+    o.Pos = mul(mul(float4(pos,1), View), Proj);
+    return o;
+}
+
+struct PSOut { float4 Albedo:SV_Target0; float4 Normal:SV_Target1; float4 PBR:SV_Target2; float4 WorldPos:SV_Target3; };
+
+PSOut PSMain(DSOut i)
+{
+    PSOut o;
+    float3 N = normalize(i.Normal);
+    float3 V = normalize(CameraPos.xyz - i.PosWS);
+    float  fres = pow(saturate(1.0f - dot(N,V)), 5.0f);
+    float3 col = lerp(DeepColor.rgb, ShallowColor.rgb, fres);
+
+    o.Albedo   = float4(col, 1.0f);
+    o.Normal   = float4(N, 0.0f);
+    o.PBR      = float4(Roughness, 0.0f, 1.0f, 1.0f);  // metallic=0 -> не emissive-флаг
+    o.WorldPos = float4(i.PosWS, 1.0f);
+    return o;
+}
+)HLSL";
 void RenderingSystem::CreateGeometryPassPSO()
 {
     auto vs = CompileShader(kGBufferShaderSrc, "VSMain", "vs_5_0");
@@ -571,7 +643,108 @@ void RenderingSystem::CreateGeometryPassPSO()
     pso.RasterizerState = raster;
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&geometryWirePSO_)));
 }
+void RenderingSystem::CreateWaterPassRootSignature()
+{
+    D3D12_ROOT_PARAMETER params[1] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[0].Descriptor.ShaderRegister = 0;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters = 1; desc.pParameters = params;
+    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> sig, err;
+    ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
+    ThrowIfFailed(device_->CreateRootSignature(0, sig->GetBufferPointer(),
+        sig->GetBufferSize(), IID_PPV_ARGS(&waterRootSig_)));
+}
+
+void RenderingSystem::CreateWaterPSO()
+{
+    auto vs = CompileShader(kWaterShaderSrc, "VSMain", "vs_5_0");
+    auto hs = CompileShader(kWaterShaderSrc, "HSMain", "hs_5_0");
+    auto ds = CompileShader(kWaterShaderSrc, "DSMain", "ds_5_0");
+    auto ps = CompileShader(kWaterShaderSrc, "PSMain", "ps_5_0");
+
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,   0, 0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"NORMAL",  0,DXGI_FORMAT_R32G32B32_FLOAT,   0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"COLOR",   0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,24,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,      0,40,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+    };
+    D3D12_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D12_FILL_MODE_SOLID;
+    raster.CullMode = D3D12_CULL_MODE_NONE;
+    raster.DepthClipEnable = TRUE;
+
+    D3D12_DEPTH_STENCIL_DESC dss = {};
+    dss.DepthEnable = TRUE;
+    dss.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    dss.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+
+    D3D12_BLEND_DESC blend = {};
+    for (UINT i = 0; i < GBUFFER_RT_COUNT; ++i)
+        blend.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = waterRootSig_.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.HS = { hs->GetBufferPointer(), hs->GetBufferSize() };
+    pso.DS = { ds->GetBufferPointer(), ds->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.InputLayout = { layout, _countof(layout) };
+    pso.RasterizerState = raster;
+    pso.DepthStencilState = dss;
+    pso.BlendState = blend;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    pso.NumRenderTargets = GBUFFER_RT_COUNT;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pso.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.SampleDesc = { 1,0 };
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&waterPSO_)));
+}
+
+void RenderingSystem::BuildWater(const std::vector<Vertex>& verts, const std::vector<UINT>& idxs)
+{
+    indexCountWater_ = (UINT)idxs.size();
+    MakeUploadBuffer(verts.data(), verts.size() * sizeof(Vertex), waterVB_);
+    vbViewWater_.BufferLocation = waterVB_->GetGPUVirtualAddress();
+    vbViewWater_.SizeInBytes = (UINT)(verts.size() * sizeof(Vertex));
+    vbViewWater_.StrideInBytes = sizeof(Vertex);
+    MakeUploadBuffer(idxs.data(), idxs.size() * sizeof(UINT), waterIB_);
+    ibViewWater_.BufferLocation = waterIB_->GetGPUVirtualAddress();
+    ibViewWater_.SizeInBytes = (UINT)(idxs.size() * sizeof(UINT));
+    ibViewWater_.Format = DXGI_FORMAT_R32_UINT;
+}
+
+void RenderingSystem::UpdateWaterCB(const WaterCB& data)
+{
+    if (waterCBMapped_)
+        memcpy(waterCBMapped_ + frameIndex_ * waterCBStride_, &data, sizeof(data));
+}
+
+void RenderingSystem::BindWaterPass()
+{
+    if (indexCountWater_ == 0) return;
+    commandList_->SetGraphicsRootSignature(waterRootSig_.Get());
+    commandList_->SetPipelineState(waterPSO_.Get());
+    commandList_->SetGraphicsRootConstantBufferView(0,
+        waterCB_->GetGPUVirtualAddress() + frameIndex_ * waterCBStride_);
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+    commandList_->IASetVertexBuffers(0, 1, &vbViewWater_);
+    commandList_->IASetIndexBuffer(&ibViewWater_);
+}
+
+void RenderingSystem::DrawWater()
+{
+    if (indexCountWater_ == 0) return;
+    commandList_->DrawIndexedInstanced(indexCountWater_, 1, 0, 0, 0);
+}
 static const char* kInstancedShaderSrc = R"HLSL(
 cbuffer GeometryCB : register(b0)
 {
@@ -628,7 +801,6 @@ struct LightData{ float4 PositionWS; float4 DirectionWS; float4 Color; float Ran
 #define MAX_CASCADES 4
 cbuffer LightingCB:register(b0){
     float4 CameraPos; int LightCount; float3 LCBPad; LightData Lights[MAX_LIGHTS];
-    // DZ #5 - order must match LightingPassCB in Types.h byte for byte
     matrix ShadowViewProj[MAX_CASCADES];
     float4 CascadeSplits;
     matrix CameraView;
@@ -764,9 +936,6 @@ float4 PSMain(FSQ i):SV_TARGET{
 )HLSL";
 
 
-// ============================================================
-//  ДЗ №4: PSO и ресурсы инстансинга
-// ============================================================
 void RenderingSystem::CreateInstancedPSO()
 {
     ComPtr<ID3DBlob> vs, ps, err;
@@ -867,10 +1036,6 @@ void RenderingSystem::DrawInstances(UINT instanceCount)
     commandList_->DrawIndexedInstanced(indexCount2_, instanceCount, 0, 0, 0);
 }
 
-
-// ============================================================
-//  DZ #5: shadow pass (depth-only rendering from the light)
-// ============================================================
 static const char* kShadowShaderSrc = R"HLSL(
 cbuffer ShadowCB : register(b0)
 {
@@ -971,7 +1136,6 @@ void RenderingSystem::CreateShadowPSOs()
     pso.BlendState = {};
     pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    // Пиксельного шейдера нет и цветовых целей нет: только глубина
     pso.NumRenderTargets = 0;
     pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pso.SampleDesc = { 1,0 };
@@ -983,8 +1147,6 @@ void RenderingSystem::CreateShadowPSOs()
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&shadowInstancedPSO_)));
 }
 
-// Каждый каскад получает свой блок константного буфера: значения должны
-// дожить до конца кадра, поэтому переиспользовать один блок нельзя.
 void RenderingSystem::BeginShadowCascade(int cascade, const XMFLOAT4X4& lightViewProj)
 {
     if (!shadows_.Ready()) return;
@@ -993,7 +1155,6 @@ void RenderingSystem::BeginShadowCascade(int cascade, const XMFLOAT4X4& lightVie
     struct ShadowCB { XMFLOAT4X4 LightViewProj; XMFLOAT4X4 World; } cb;
     cb.LightViewProj = lightViewProj;
     XMStoreFloat4x4(&cb.World, XMMatrixTranspose(XMMatrixIdentity()));
-    // HLSL ждёт транспонированные матрицы, как и в остальных проходах
     XMMATRIX lvp = XMLoadFloat4x4(&lightViewProj);
     XMStoreFloat4x4(&cb.LightViewProj, XMMatrixTranspose(lvp));
 
@@ -1013,8 +1174,6 @@ void RenderingSystem::DrawShadowMesh1()
     commandList_->SetPipelineState(shadowPSO_.Get());
     commandList_->IASetVertexBuffers(0, 1, &vbView_);
     commandList_->IASetIndexBuffer(&ibView_);
-    // Материалы в проходе глубины не нужны, поэтому вся Sponza идёт
-    // одним вызовом вместо сотен per-material draw call'ов.
     commandList_->DrawIndexedInstanced(indexCount_, 1, 0, 0, 0);
 }
 
@@ -1024,8 +1183,6 @@ void RenderingSystem::DrawShadowMesh1Sub(const std::vector<int>& visible)
     commandList_->SetPipelineState(shadowPSO_.Get());
     commandList_->IASetVertexBuffers(0, 1, &vbView_);
     commandList_->IASetIndexBuffer(&ibView_);
-    // Текстуры в проходе глубины не нужны, поэтому между вызовами
-    // не меняется вообще ничего — только диапазон индексов.
     for (int i : visible)
     {
         if (i < 0 || i >= static_cast<int>(subDrawCalls_.size())) continue;
@@ -1042,7 +1199,6 @@ void RenderingSystem::DrawShadowInstances(UINT instanceCount)
     if (instanceCount == 0) return;
 
     commandList_->SetPipelineState(shadowInstancedPSO_.Get());
-    // Второй регион: все объекты, а не только прошедшие отсечение камерой
     commandList_->SetGraphicsRootShaderResourceView(1,
         instanceBuffer_->GetGPUVirtualAddress() + frameIndex_ * instanceStride_
         + SHADOW_INSTANCE_OFFSET);
@@ -1051,7 +1207,6 @@ void RenderingSystem::DrawShadowInstances(UINT instanceCount)
     commandList_->DrawIndexedInstanced(indexCount2_, instanceCount, 0, 0, 0);
 }
 
-// ДЗ №6: обновление позиций идёт исключительно в compute шейдере
 void RenderingSystem::SimulateParticles(const ParticleCB& cb)
 {
     particles_.Simulate(commandList_.Get(), srvHeap_.Get(), cb);
@@ -1067,10 +1222,6 @@ void RenderingSystem::EndShadowPass()
     if (!shadows_.Ready()) return;
     shadows_.EndPass(commandList_.Get());
 
-    // ОБЯЗАТЕЛЬНО: проход теней подменил viewport на разрешение карты и
-    // отвязал цветовые цели. BeginFrame выставляет их только один раз в
-    // начале кадра, поэтому восстанавливать нужно здесь — иначе вся
-    // остальная геометрия отрисуется в область 2048x2048 без целей.
     commandList_->OMSetRenderTargets(GBUFFER_RT_COUNT, gbuffer_.GetRTVHandles(),
         FALSE, &dsvHandle_);
     D3D12_VIEWPORT vp = { 0,0,(float)width_,(float)height_,0,1 };
@@ -1098,9 +1249,6 @@ void RenderingSystem::CreateLightingPassPSO()
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&lightingPSO_)));
 }
 
-// ============================================================
-//  Texture helpers
-// ============================================================
 D3D12_GPU_DESCRIPTOR_HANDLE RenderingSystem::GpuHandle(int slot) const
 {
     D3D12_GPU_DESCRIPTOR_HANDLE h = srvHeap_->GetGPUDescriptorHandleForHeapStart();
@@ -1119,15 +1267,9 @@ void RenderingSystem::CreateSRVInSlot(ID3D12Resource* res, DXGI_FORMAT fmt, int 
     device_->CreateShaderResourceView(res, &srv, h);
 }
 
-// Displacement-карта материала. Порядок: файл по указанному пути ->
-// восстановление рельефа из карты нормалей -> нейтральная заглушка.
-// Sponza не содержит height-текстур, поэтому на практике почти всегда
-// срабатывает второй вариант.
 int RenderingSystem::LoadAndCacheDisplacement(const std::wstring& dispPath,
     const std::wstring& normalPath)
 {
-    // Ключ кэша: реальный путь либо синтетический, чтобы одна и та же
-    // карта нормалей интегрировалась ровно один раз.
     const std::wstring key = !dispPath.empty() ? dispPath
         : (normalPath.empty() ? std::wstring() : L"@height:" + normalPath);
     if (key.empty()) return SRV_FALLBACK_DISP;
@@ -1143,8 +1285,6 @@ int RenderingSystem::LoadAndCacheDisplacement(const std::wstring& dispPath,
         TextureData nm = LoadTextureAuto(normalPath);
         if (nm.valid)
         {
-            // Интегрирование градиента — самая дорогая операция загрузки.
-            // Замер печатает суммарное время по всем материалам.
             LoadTimer t("  восстановление карты высот");
             td = CreateHeightFromNormal(nm);
         }
@@ -1227,9 +1367,6 @@ int RenderingSystem::LoadAndCacheTexture(const std::wstring& path, bool isNormal
     return slot;
 }
 
-// ============================================================
-//  BuildMesh1
-// ============================================================
 void RenderingSystem::BuildMesh1(
     const std::vector<Vertex>& verts, const std::vector<UINT>& idxs,
     const std::vector<UINT>& subIndexStarts, const std::vector<UINT>& subIndexCounts,
@@ -1250,7 +1387,6 @@ void RenderingSystem::BuildMesh1(
     {
         subDrawCalls_[i].indexStart = subIndexStarts[i];
         subDrawCalls_[i].indexCount = subIndexCounts[i];
-        // Загружаем или берём из кэша — одна текстура грузится ровно один раз
         subDrawCalls_[i].srvDiffuse = LoadAndCacheTexture(subDiffuse[i], false);
         subDrawCalls_[i].srvNormal = LoadAndCacheTexture(subNormal[i], true);
         subDrawCalls_[i].srvDisp = LoadAndCacheDisplacement(
@@ -1258,9 +1394,6 @@ void RenderingSystem::BuildMesh1(
     }
 }
 
-// ============================================================
-//  BuildBuffers2 / UploadTextureMesh2
-// ============================================================
 void RenderingSystem::BuildBuffers2(const std::vector<Vertex>& verts, const std::vector<UINT>& idxs)
 {
     indexCount2_ = (UINT)idxs.size();
@@ -1271,12 +1404,10 @@ void RenderingSystem::BuildBuffers2(const std::vector<Vertex>& verts, const std:
     ibView2_.BufferLocation = indexBuffer2_->GetGPUVirtualAddress();
     ibView2_.SizeInBytes = (UINT)(idxs.size() * sizeof(UINT)); ibView2_.Format = DXGI_FORMAT_R32_UINT;
 
-    // Резервируем 4 слота для mesh2 и заполняем fallback
     mesh2SrvBase_ = srvNextFree_;
     srvNextFree_ += 4;
     if (srvNextFree_ > SRV_HEAP_SIZE) ThrowIfFailed(E_FAIL, "SRV heap overflow (mesh2)");
 
-    // Копируем fallback дескрипторы в 4 слота mesh2
     auto CopySlot = [&](int from, int to)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE s = srvHeap_->GetCPUDescriptorHandleForHeapStart();
@@ -1316,9 +1447,6 @@ void RenderingSystem::MakeUploadBuffer(const void* data, UINT64 byteSize, ComPtr
     memcpy(m, data, (size_t)byteSize); buf->Unmap(0, nullptr);
 }
 
-// ============================================================
-//  Constant Buffers
-// ============================================================
 void RenderingSystem::CreateConstantBuffers()
 {
     auto Align256 = [](UINT64 n) {return (n + 255) & ~UINT64(255);};
@@ -1332,7 +1460,6 @@ void RenderingSystem::CreateConstantBuffers()
         ThrowIfFailed(device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&res)));
         };
-    // Каждый CB — кольцо из RS_FRAME_COUNT блоков, выровненных по 256 байт.
     geometryCBStride_ = Align256(sizeof(ConstantBufferData));
     geometryCB2Stride_ = Align256(sizeof(ConstantBufferData));
     lightingCBStride_ = Align256(sizeof(LightingPassCB));
@@ -1344,25 +1471,22 @@ void RenderingSystem::CreateConstantBuffers()
     make(lightingCBStride_ * RS_FRAME_COUNT, lightingCBRes_);
     ThrowIfFailed(lightingCBRes_->Map(0, nullptr, reinterpret_cast<void**>(&lightingCBMapped_)));
 
-    // Буфер матриц инстансов (ДЗ №4)
-    // Два региона на кадр: [0] видимые для основного прохода,
-    // [RS_MAX_INSTANCES] все объекты для прохода теней. Объект за спиной
-    // камеры не виден, но тень внутрь кадра отбрасывать может.
     instanceStride_ = Align256(sizeof(XMFLOAT4X4) * RS_MAX_INSTANCES * 2);
     make(instanceStride_ * RS_FRAME_COUNT, instanceBuffer_);
     ThrowIfFailed(instanceBuffer_->Map(0, nullptr, reinterpret_cast<void**>(&instanceMapped_)));
 
-    // ДЗ №5: по блоку на каждый каскад каждого кадра
     shadowCBStride_ = Align256(sizeof(XMFLOAT4X4) * 2);
     make(shadowCBStride_ * RS_FRAME_COUNT * CascadedShadowMap::MAX_CASCADES, shadowCB_);
     ThrowIfFailed(shadowCB_->Map(0, nullptr, reinterpret_cast<void**>(&shadowCBMapped_)));
+
+    waterCBStride_ = Align256(sizeof(WaterCB));
+    make(waterCBStride_ * RS_FRAME_COUNT, waterCB_);
+    ThrowIfFailed(waterCB_->Map(0, nullptr, reinterpret_cast<void**>(&waterCBMapped_)));
 
     shadows_.Create(device_.Get(), srvHeap_.Get(), SRV_SHADOWMAP, srvDescSize_);
     particles_.Create(device_.Get(), srvHeap_.Get(), SRV_PARTICLES, srvDescSize_);
 }
 
-// Пишем в блок текущего frameIndex_. MoveToNextFrame уже дождался, пока GPU
-// закончит с этим индексом, поэтому запись безопасна.
 void RenderingSystem::UpdateGeometryPassCB(const ConstantBufferData& data)
 {
     if (geometryCBMapped_)
@@ -1380,9 +1504,6 @@ void RenderingSystem::UpdateLightingPassCB(const LightingPassCB& data)
         memcpy(lightingCBMapped_ + frameIndex_ * lightingCBStride_, &data, sizeof(data));
 }
 
-// ============================================================
-//  Lights
-// ============================================================
 void RenderingSystem::ClearLights() { lightingCB_.LightCount = 0; }
 void RenderingSystem::AddDirectionalLight(XMFLOAT3 dir, XMFLOAT3 col, float intens) {
     if (lightingCB_.LightCount >= MAX_LIGHTS)return;
@@ -1408,9 +1529,6 @@ void RenderingSystem::AddSpotLight(XMFLOAT3 pos, XMFLOAT3 dir, XMFLOAT3 col, flo
     l.Type = (UINT)LightType::Spot;
 }
 
-// ============================================================
-//  Frame
-// ============================================================
 ID3D12GraphicsCommandList* RenderingSystem::BeginFrame()
 {
     ThrowIfFailed(commandAllocators_[frameIndex_]->Reset());
@@ -1435,9 +1553,6 @@ void RenderingSystem::BindGeometryPass()
     commandList_->SetDescriptorHeaps(1, heaps);
     commandList_->SetGraphicsRootConstantBufferView(0,
         geometryCB_->GetGPUVirtualAddress() + frameIndex_ * geometryCBStride_);
-    // param[2] = albedo2 — общий, не меняется между draw calls.
-    // param[4] = displacement — теперь свой у каждого материала,
-    // поэтому биндится в DrawMesh1SubMeshes, а не здесь.
     commandList_->SetGraphicsRootDescriptorTable(2, GpuHandle(SRV_COMMON_ALBEDO2));
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
     commandList_->IASetVertexBuffers(0, 1, &vbView_);
@@ -1469,7 +1584,6 @@ void RenderingSystem::BindGeometryPassMesh2()
 {
     commandList_->SetGraphicsRootConstantBufferView(0,
         geometryCB2_->GetGPUVirtualAddress() + frameIndex_ * geometryCB2Stride_);
-    // Mesh2: все 4 текстуры из mesh2SrvBase_
     commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0)); // diffuse
     commandList_->SetGraphicsRootDescriptorTable(2, GpuHandle(mesh2SrvBase_ + 1)); // albedo2
     commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2)); // normal

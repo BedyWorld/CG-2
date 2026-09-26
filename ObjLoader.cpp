@@ -7,7 +7,6 @@
 
 using namespace DirectX;
 
-// ---- Material -------------------------------------------------------
 struct Material
 {
     XMFLOAT4     diffuse = { 1,1,1,1 };
@@ -15,7 +14,6 @@ struct Material
     std::wstring normalPath;    // map_bump / bump / map_Kn
 };
 
-// ---- Helper: split "v/vt/vn" token ----------------------------------
 static void ParseFaceVert(const std::string& token, int& p, int& t, int& n)
 {
     p = t = n = 0;
@@ -30,7 +28,6 @@ static void ParseFaceVert(const std::string& token, int& p, int& t, int& n)
     if (!parts[2].empty()) n = std::stoi(parts[2]);
 }
 
-// ---- Trim helper ----------------------------------------------------
 static std::string TrimLine(const std::string& s)
 {
     std::string r = s;
@@ -57,7 +54,6 @@ static std::wstring MakeTexturePath(const std::wstring& dir, const std::string& 
     return dir + wname;
 }
 
-// ---- Load MTL -------------------------------------------------------
 static std::map<std::string, Material>
 LoadMtl(const std::wstring& mtlPath, const std::wstring& dir)
 {
@@ -129,7 +125,6 @@ LoadMtl(const std::wstring& mtlPath, const std::wstring& dir)
     return mats;
 }
 
-// ---- Main OBJ loader ------------------------------------------------
 ObjResult LoadObj(const std::wstring& path)
 {
     ObjResult out;
@@ -273,7 +268,6 @@ ObjResult LoadObj(const std::wstring& path)
 
     if (out.vertices.empty()) return out;
 
-    // Сглаженные нормали если OBJ не содержал vn
     if (normals.empty())
     {
         for (auto& v : out.vertices) v.Normal = {};

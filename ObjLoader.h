@@ -4,23 +4,15 @@
 #include <string>
 #include "Types.h"
 
-// ============================================================
-//  SubMesh — диапазон индексов с одним материалом
-//  diffusePath  = map_Kd  (albedo/diffuse текстура)
-//  normalPath   = map_bump / bump / map_Kn (normal map, DDN)
-// ============================================================
 struct SubMesh
 {
     UINT         indexStart  = 0;
     UINT         indexCount  = 0;
-    std::wstring diffusePath;   // может быть пустой
-    std::wstring normalPath;    // может быть пустой
+    std::wstring diffusePath;
+    std::wstring normalPath;
     std::string  materialName;
 };
 
-// ============================================================
-//  ObjResult
-// ============================================================
 struct ObjResult
 {
     std::vector<Vertex>  vertices;

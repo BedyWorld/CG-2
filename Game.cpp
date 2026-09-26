@@ -38,6 +38,7 @@ bool Game::Initialize()
         rs_->ReleaseTextureUploadBuffers();
         { LoadTimer t("CB + тени + частицы"); rs_->CreateConstantBuffers(); }
         { LoadTimer t("октодерево (300 объектов)"); BuildSceneObjects(); }
+        { LoadTimer t("плоскость воды"); BuildWaterPlane(); }
         return true;
     }
     catch (const std::exception& e)
@@ -91,18 +92,21 @@ void Game::OnKeyDown(int vkey)
 {
     if (vkey == VK_ESCAPE) { ReleaseMouse(); return; }
     if (vkey == 'R') { ClearStuckLights(); return; }
-    if (vkey == 'F') { ToggleFrustumCulling(); return; }   // frustum culling вкл/выкл
-    if (vkey == 'O') { ToggleOctreeCulling();  return; }   // октодерево вкл/выкл
-    if (vkey == 'T') { tessEnabled_ = !tessEnabled_; return; }  // тесселяция вкл/выкл
-    if (vkey == 'C') { shadowsEnabled_ = !shadowsEnabled_; return; } // каскадные тени
-    if (vkey == 'P') { particlesEnabled_ = !particlesEnabled_; return; } // частицы
-    if (vkey == 'G') {                      // каркасный режим: видно тесселяцию
+    if (vkey == 'B') { waterEnabled_ = !waterEnabled_; return; }
+    if (vkey == 'F') { ToggleFrustumCulling(); return; }
+    if (vkey == 'O') { ToggleOctreeCulling();  return; }
+    if (vkey == VK_OEM_PLUS || vkey == VK_ADD)       waterAmpScale_ = min(waterAmpScale_ + 0.1f, 3.0f);
+    if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) waterAmpScale_ = max(waterAmpScale_ - 0.1f, 0.0f);
+    if (vkey == 'T') { tessEnabled_ = !tessEnabled_; return; }
+    if (vkey == 'C') { shadowsEnabled_ = !shadowsEnabled_; return; }
+    if (vkey == 'P') { particlesEnabled_ = !particlesEnabled_; return; }
+    if (vkey == 'G') {
         wireframe_ = !wireframe_;
         rs_->SetWireframe(wireframe_);
         return;
     }
-    if (vkey == 'V') { debugMode_ = (debugMode_ + 1) % 3; return; }  // 0 выкл, 1 каскады, 2 карта теней
-    if (vkey == 'I') { instancesEnabled_ = !instancesEnabled_; return; } // объекты ДЗ №4
+    if (vkey == 'V') { debugMode_ = (debugMode_ + 1) % 3; return; }
+    if (vkey == 'I') { instancesEnabled_ = !instancesEnabled_; return; }
     if (vkey == VK_OEM_PLUS || vkey == VK_ADD)       dispScale_ = min(dispScale_ + 0.05f, 2.0f);
     if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) dispScale_ = max(dispScale_ - 0.05f, 0.0f);
 }
@@ -211,11 +215,6 @@ void Game::LoadSceneGeometry()
                 b.Min.x = fminf(b.Min.x, p.x); b.Min.y = fminf(b.Min.y, p.y); b.Min.z = fminf(b.Min.z, p.z);
                 b.Max.x = fmaxf(b.Max.x, p.x); b.Max.y = fmaxf(b.Max.y, p.y); b.Max.z = fmaxf(b.Max.z, p.z);
             }
-            // Если цикл не набрал ни одной вершины, границы остаются
-            // перевёрнутыми (Min=+inf, Max=-inf). Полуразмер тогда выходит
-            // отрицательным, и тест плоскостей отбрасывает субмеш ВСЕГДА.
-            // Битый объём не должен прятать геометрию, поэтому делаем его
-            // бесконечным — субмеш будет считаться видимым при любом ракурсе.
             if (b.Min.x > b.Max.x || b.Min.y > b.Max.y || b.Min.z > b.Max.z)
             {
                 b.Min = { -FLT_MAX / 4, -FLT_MAX / 4, -FLT_MAX / 4 };
@@ -223,7 +222,6 @@ void Game::LoadSceneGeometry()
             }
             else
             {
-                // Запас на смещение вершин по displacement в domain shader
                 const float pad = 0.5f;
                 b.Min.x -= pad; b.Min.y -= pad; b.Min.z -= pad;
                 b.Max.x += pad; b.Max.y += pad; b.Max.z += pad;
@@ -294,6 +292,40 @@ void Game::LoadSceneGeometry2()
     rs_->BuildBuffers2(verts, idxs);
 }
 
+void Game::BuildWaterPlane()
+{
+    const int   N = 48;
+    const float HALF = 34.0f;
+    const float Y = waterHeight_;
+
+    std::vector<Vertex> verts;
+    std::vector<UINT>   idxs;
+    verts.reserve((N + 1) * (N + 1));
+
+    for (int z = 0; z <= N; ++z)
+        for (int x = 0; x <= N; ++x)
+        {
+            float fx = -HALF + 2.0f * HALF * (float(x) / N);
+            float fz = -HALF + 2.0f * HALF * (float(z) / N);
+            Vertex v = {};
+            v.Position = { fx, Y, fz };
+            v.Normal = { 0,1,0 };
+            v.Color = { 1,1,1,1 };
+            v.TexCoord = { float(x) / N, float(z) / N };
+            verts.push_back(v);
+        }
+
+    auto IDX = [&](int x, int z) { return (UINT)(z * (N + 1) + x); };
+    for (int z = 0; z < N; ++z)
+        for (int x = 0; x < N; ++x)
+        {
+            UINT a = IDX(x, z), b = IDX(x + 1, z), c = IDX(x + 1, z + 1), d = IDX(x, z + 1);
+            idxs.insert(idxs.end(), { a,b,c, a,c,d }); // каждый треугольник = patch
+        }
+
+    rs_->BuildWater(verts, idxs);
+}
+
 void Game::LoadSceneTextures2()
 {
     wchar_t exePath[MAX_PATH] = {};
@@ -319,7 +351,7 @@ void Game::LoadSceneTextures2()
     if (!tdN.valid) tdN = CreateFlatNormal();
     rs_->UploadTextureMesh2(tdN, 2);
 
-    // displacement — процедурный синусоидальный узор
+    // displacement
     TextureData tdD = LoadTextureAuto(dir + L"model2_displacement.png");
     if (!tdD.valid) tdD = LoadTextureAuto(dir + L"model2_displacement.jpg");
     if (!tdD.valid)
@@ -341,7 +373,6 @@ void Game::LoadSceneTextures2()
     rs_->UploadTextureMesh2(tdD, 3);
 }
 
-//  Raycast
 bool Game::RayTriangle(XMFLOAT3 orig, XMFLOAT3 dir, XMFLOAT3 v0, XMFLOAT3 v1, XMFLOAT3 v2, float& t)
 {
     const float EPS = 1e-7f;
@@ -356,8 +387,6 @@ bool Game::RayTriangle(XMFLOAT3 orig, XMFLOAT3 dir, XMFLOAT3 v0, XMFLOAT3 v1, XM
     t = f * F3Dot(e2, q); return (t > EPS);
 }
 
-//  BVH: построение (один раз при загрузке меша)
-// Свои min/max: не зависим от того, определён ли NOMINMAX и в каком порядке подключены windows.h и <algorithm>.
 static inline float FMin(float a, float b) { return a < b ? a : b; }
 static inline float FMax(float a, float b) { return a > b ? a : b; }
 
@@ -383,19 +412,15 @@ void Game::BuildBVH()
                              (a.z + b.z + c.z) / 3.f };
     }
 
-    // Верхняя оценка: 2N узлов достаточно для бинарного дерева над N листьями
     bvhNodes_.reserve(triCount * 2);
     BuildBVHRecursive(0, static_cast<int>(triCount), 0);
 }
 
-// Возвращает индекс созданного узла. Разбиение — median split по самой
-// длинной оси bounding box'а (дёшево строить, достаточно хорошо для статики).
 int Game::BuildBVHRecursive(int first, int count, int depth)
 {
     const int nodeIdx = static_cast<int>(bvhNodes_.size());
     bvhNodes_.push_back(BVHNode{});
 
-    // Bounding box узла по вершинам треугольников
     XMFLOAT3 bmin = { FLT_MAX,  FLT_MAX,  FLT_MAX };
     XMFLOAT3 bmax = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
     for (int i = 0; i < count; ++i)
@@ -421,7 +446,6 @@ int Game::BuildBVHRecursive(int first, int count, int depth)
         return nodeIdx;
     }
 
-    // Самая длинная ось
     const float ex = bmax.x - bmin.x, ey = bmax.y - bmin.y, ez = bmax.z - bmin.z;
     const int axis = (ex > ey && ex > ez) ? 0 : (ey > ez ? 1 : 2);
 
@@ -436,8 +460,6 @@ int Game::BuildBVHRecursive(int first, int count, int depth)
         triIndices_.begin() + first + count,
         [&](int a, int b) { return centroidAxis(a) < centroidAxis(b); });
 
-    // Вырожденный случай: все центроиды совпали — делаем лист,
-    // иначе рекурсия не сойдётся.
     if (mid == 0 || mid == count)
     {
         bvhNodes_[nodeIdx].left = -1;
@@ -449,15 +471,12 @@ int Game::BuildBVHRecursive(int first, int count, int depth)
     const int leftChild = BuildBVHRecursive(first, mid, depth + 1);
     const int rightChild = BuildBVHRecursive(first + mid, count - mid, depth + 1);
 
-    // ВАЖНО: bvhNodes_ мог перевыделиться внутри рекурсии,
-    // поэтому пишем по индексу, а не по сохранённой ссылке.
     bvhNodes_[nodeIdx].left = leftChild;
     bvhNodes_[nodeIdx].right = rightChild;
     bvhNodes_[nodeIdx].count = 0;
     return nodeIdx;
 }
 
-// Slab-тест луча против AABB. Возвращает ближнюю точку входа.
 static bool RayAABB(const XMFLOAT3& orig, const XMFLOAT3& invDir,
     const XMFLOAT3& bmin, const XMFLOAT3& bmax, float tMax, float& tNear)
 {
@@ -483,7 +502,6 @@ bool Game::TraverseBVH(const XMFLOAT3& orig, const XMFLOAT3& invDir,
     if (bvhNodes_.empty()) return false;
 
     bool hit = false;
-    // Явный стек — рекурсия здесь заметно медленнее и рискует переполнением
     int stack[64];
     int sp = 0;
     stack[sp++] = 0;
@@ -496,10 +514,9 @@ bool Game::TraverseBVH(const XMFLOAT3& orig, const XMFLOAT3& invDir,
         float tNear = 0.f;
         if (!RayAABB(orig, invDir, node.bmin, node.bmax, outT, tNear))
             continue;
-        // Узел целиком дальше уже найденного попадания
         if (tNear > outT) continue;
 
-        if (node.count > 0)   // лист
+        if (node.count > 0)
         {
             for (int i = 0; i < node.count; ++i)
             {
@@ -534,8 +551,7 @@ bool Game::RaycastMesh(XMFLOAT3 origin, XMFLOAT3 dir, float maxDist, float& outT
     XMVECTOR dirV = XMVector3Normalize(XMVector3TransformNormal(XMLoadFloat3(&dir), invWorld));
     XMFLOAT3 origOS, dirOS;
     XMStoreFloat3(&origOS, origV); XMStoreFloat3(&dirOS, dirV);
-
-    // 1/dir для slab-теста. Нули дают inf — это корректно обрабатывается.
+    
     const float kTiny = 1e-8f;
     XMFLOAT3 invDir = {
         1.0f / (fabsf(dirOS.x) < kTiny ? copysignf(kTiny, dirOS.x ? dirOS.x : 1.f) : dirOS.x),
@@ -545,7 +561,6 @@ bool Game::RaycastMesh(XMFLOAT3 origin, XMFLOAT3 dir, float maxDist, float& outT
 
     return TraverseBVH(origOS, invDir, dirOS, outT);
 }
-//  Выстрел
 void Game::OnShoot()
 {
     if ((int)bullets_.size() >= MAX_BULLETS) return;
@@ -561,7 +576,6 @@ void Game::OnShoot()
     bullets_.push_back(b);
 }
 
-//  UpdateBullets
 void Game::UpdateBullets(float dt)
 {
     for (auto& b : bullets_)
@@ -585,16 +599,11 @@ void Game::UpdateBullets(float dt)
             if (dx * dx + dy * dy + dz * dz > BULLET_MAX_DIST * BULLET_MAX_DIST) b.Active = false;
         }
     }
-    // Застрявший снаряд уже скопирован в stuckLights_ — держать его ещё и
-    // здесь незачем. Старый предикат (!Active && !Stuck) их не удалял, поэтому
-    // bullets_ рос бесконечно: и трассировка дорожала, и лимит MAX_BULLETS
-    // со временем блокировал стрельбу насовсем.
     bullets_.erase(std::remove_if(bullets_.begin(), bullets_.end(),
         [](const LightBullet& b) { return !b.Active; }), bullets_.end());
 }
 
 
-// HLSL ожидает транспонированные матрицы, как и в остальных проходах
 static XMFLOAT4X4 TransposeF4x4(const XMFLOAT4X4& m)
 {
     XMFLOAT4X4 r;
@@ -602,8 +611,6 @@ static XMFLOAT4X4 TransposeF4x4(const XMFLOAT4X4& m)
     return r;
 }
 
-// Объекты стоят на месте (крутятся вокруг своей оси), поэтому мировые
-// AABB считаются один раз при старте, и октодерево не нужно перестраивать.
 void Game::BuildSceneObjects()
 {
     objects_.clear();
@@ -611,8 +618,6 @@ void Game::BuildSceneObjects()
     objects_.reserve(SCENE_OBJECT_COUNT);
     objectBounds_.reserve(SCENE_OBJECT_COUNT);
 
-    // Детерминированный генератор: сцена одинакова между запусками,
-    // иначе сравнивать замеры бессмысленно.
     std::mt19937 rng(20240501);
     std::uniform_real_distribution<float> ux(-28.f, 28.f);
     std::uniform_real_distribution<float> uy(-2.f, 16.f);
@@ -630,9 +635,6 @@ void Game::BuildSceneObjects()
         o.SpinPhase = uph(rng);
         objects_.push_back(o);
 
-        // Модель — сфера единичного радиуса, поэтому AABB от вращения
-        // не меняется. Запас sqrt(3) оставлен на случай, если model2.obj
-        // окажется не сферой, а вытянутым мешем.
         const float r = o.Scale * 1.7321f;
         AABB b;
         b.Min = { o.Position.x - r, o.Position.y - r, o.Position.z - r };
@@ -645,10 +647,6 @@ void Game::BuildSceneObjects()
     instanceMatrices_.reserve(SCENE_OBJECT_COUNT);
 }
 
-// Отбор видимых. Три режима, переключаются на лету:
-//   F выкл          — рисуем всё
-//   F вкл,  O выкл  — перебор всех AABB
-//   F вкл,  O вкл   — обход октодерева
 void Game::CullSceneObjects()
 {
     const LARGE_INTEGER t0 = []() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t; }();
@@ -664,8 +662,6 @@ void Game::CullSceneObjects()
     }
     else
     {
-        // Плоскости берём из НЕтранспонированной view*proj: в константный
-        // буфер матрицы уходят транспонированными, здесь нужна исходная.
         XMFLOAT4X4 vp;
         XMStoreFloat4x4(&vp, XMMatrixMultiply(viewMatrix_, projMatrix_));
         const Frustum frustum = Frustum::FromViewProj(vp);
@@ -689,8 +685,6 @@ void Game::CullSceneObjects()
     statCullMs_ = 1000.0f * float(t1.QuadPart - t0.QuadPart) / float(freq.QuadPart);
     statVisible_ = static_cast<int>(visibleObjects_.size());
 
-    // Субмеши Sponza отсекаются тем же фрустумом. Их немного (десятки),
-    // поэтому перебором — октодерево тут не окупилось бы.
     visibleSubMeshes_.clear();
     statSubTotal_ = static_cast<int>(sponzaBounds_.size());
     if (!frustumCullEnabled_)
@@ -710,8 +704,6 @@ void Game::CullSceneObjects()
     }
     statSubVisible_ = static_cast<int>(visibleSubMeshes_.size());
 
-    // Два набора матриц: видимые для основного прохода и ВСЕ для теней.
-    // Объект за спиной камеры не рисуется, но тень внутрь кадра бросать может.
     instanceMatrices_.clear();
     allInstanceMatrices_.clear();
     for (size_t i = 0; i < objects_.size(); ++i)
@@ -734,7 +726,7 @@ void Game::CullSceneObjects()
             XMMatrixTranslation(o.Position.x, o.Position.y, o.Position.z);
 
         XMFLOAT4X4 f;
-        XMStoreFloat4x4(&f, XMMatrixTranspose(m));   // HLSL ждёт транспонированную
+        XMStoreFloat4x4(&f, XMMatrixTranspose(m));
         instanceMatrices_.push_back(f);
     }
     rs_->UpdateInstances(instanceMatrices_, allInstanceMatrices_);
@@ -742,10 +734,6 @@ void Game::CullSceneObjects()
 
 void Game::UpdateWindowTitle()
 {
-    // Только ASCII. Файл сохранён в UTF-8, и без флага /utf-8 компилятор
-    // MSVC читает исходник в системной кодировке (на русской Windows —
-    // CP1251). Кириллица в строковом литерале превращается при этом в
-    // мусор на экране. Комментарии от этого не страдают, литералы — да.
     const wchar_t* mode = !frustumCullEnabled_ ? L"off"
         : (octreeCullEnabled_ ? L"octree" : L"brute");
 
@@ -790,19 +778,15 @@ void Game::Update(float deltaTime)
     if (GetAsyncKeyState('D') & 0x8000) camPos_ = F3Sub(camPos_, F3Scale(right, speed * deltaTime));
     if (GetAsyncKeyState(VK_SPACE) & 0x8000)   camPos_.y += speed * deltaTime;
     if (GetAsyncKeyState(VK_CONTROL) & 0x8000) camPos_.y -= speed * deltaTime;
-    // E поднимает камеру, Q опускает. Пробел и Ctrl оставлены как были.
+    // E поднимает камеру Q опускает
     if (GetAsyncKeyState('E') & 0x8000) camPos_.y += speed * deltaTime;
     if (GetAsyncKeyState('Q') & 0x8000) camPos_.y -= speed * deltaTime;
 
-    // Стрелки двигают вторую модель по мировым осям X и Z. Именно мировым,
-    // а не относительно камеры: так положение предсказуемо и не зависит от
-    // того, куда вы в этот момент смотрите.
     const float modelSpeed = 3.0f;
     if (GetAsyncKeyState(VK_LEFT) & 0x8000)  mesh2Pos_.x -= modelSpeed * deltaTime;
     if (GetAsyncKeyState(VK_RIGHT) & 0x8000) mesh2Pos_.x += modelSpeed * deltaTime;
     if (GetAsyncKeyState(VK_UP) & 0x8000)    mesh2Pos_.z += modelSpeed * deltaTime;
     if (GetAsyncKeyState(VK_DOWN) & 0x8000)  mesh2Pos_.z -= modelSpeed * deltaTime;
-    // PageUp и PageDown — по высоте, раз уж стрелки заняты горизонталью
     if (GetAsyncKeyState(VK_PRIOR) & 0x8000) mesh2Pos_.y += modelSpeed * deltaTime;
     if (GetAsyncKeyState(VK_NEXT) & 0x8000)  mesh2Pos_.y -= modelSpeed * deltaTime;
     camForward_ = forward;
@@ -817,19 +801,8 @@ void Game::Update(float deltaTime)
     const float DIST_NEAR = 1.0f, DIST_FAR = 20.0f;
     float distToCenter = sqrtf(camPos_.x * camPos_.x + camPos_.y * camPos_.y + camPos_.z * camPos_.z);
     float t = saturate01((distToCenter - DIST_NEAR) / (DIST_FAR - DIST_NEAR));
-    // BlendFactor=0: всегда показываем t0 (diffuse материала), t1 не используется
     float blend = 0.0f;
 
-    // TessMaxLevel и DisplacementScale раньше домножались на (1 - t), то есть
-    // на расстояние камеры до НАЧАЛА КООРДИНАТ. Для Sponza, внутри которой
-    // камера и ходит, это бессмысленно: вся модель разом теряла тесселяцию и
-    // рельеф при отходе от центра атриума. Адаптивность по расстоянию — задача
-    // hull shader'а, он считает её отдельно для каждого ребра патча.
-    // Фактор 12 на всю Sponza — это до 144 подтреугольников на каждый из
-    // 260к исходных, порядка 37 млн треугольников за кадр. Снижено до 5,
-    // а дальняя граница затухания подтянута с 20 до 12 единиц, чтобы
-    // полный фактор получала только геометрия прямо перед камерой.
-    // Клавиша T полностью выключает тесселяцию (фактор 1).
     const float tessMax = tessEnabled_ ? 5.0f : 1.0f;
     const float dispScaleEffective = dispScale_;
 
@@ -851,16 +824,6 @@ void Game::Update(float deltaTime)
     UpdateBullets(deltaTime);
     rs_->ClearLights();
 
-    // ПОРЯДОК ВАЖЕН. MAX_LIGHTS = 16 — жёсткий лимит, всё сверх него
-    // молча отбрасывается в Add*Light. Раньше снаряды добавлялись первыми,
-    // и после нескольких выстрелов освещение сцены целиком вытеснялось
-    // из буфера — мир темнел ровно в момент стрельбы.
-    // Сначала ставим постоянные источники сцены, снаряды берут остаток.
-
-    // Динамические источники
-    // Первый направленный источник — "солнце". Он добавляется раньше всех,
-    // поэтому его индекс в массиве Lights равен нулю; именно под его
-    // направление строятся каскады теней.
     {
         float sa = time_ * 0.15f;
         sunDir_ = { sinf(sa), -0.6f - 0.3f * cosf(time_ * 0.07f), cosf(sa) };
@@ -875,42 +838,27 @@ void Game::Update(float deltaTime)
     { float sa = -time_ * .7f + PI, sr = .5f; XMFLOAT3 sd = F3Norm({ sinf(sa) * sr - .4f,-1.f,cosf(sa) * sr - .4f }); rs_->AddSpotLight({ 5.f,5.f,5.f }, sd, { .8f,.1f,1.f }, 7.f, 12.f, 10.f, 22.f); }
     { float pulse = .6f + .4f * fabsf(sinf(time_ * 2.5f)); XMFLOAT3 sd = F3Norm({ 0.f,.6f,-1.f }); rs_->AddSpotLight({ 0.f,-3.f,6.f }, sd, { 1.f,1.f,1.f }, 5.f * pulse, 11.f, 8.f, 20.f); }
 
-    // Снаряды и застрявшие огни — в оставшиеся слоты.
-    // Активные снаряды приоритетнее застрявших: игрок смотрит на них сейчас.
     for (auto& b : bullets_)
         if (b.Active && !b.Stuck)
             rs_->AddPointLight(b.Position, b.Color, b.Intensity * 0.7f, 2.5f);
     for (auto& sl : stuckLights_)
         rs_->AddPointLight(sl.Position, sl.Color, sl.Intensity, sl.Range);
 
-    // ДЗ №4: отбор видимых объектов и загрузка их матриц.
-    // Делается после того, как view/proj посчитаны для этого кадра.
     CullSceneObjects();
 
-    // Скользящее среднее времени кадра: мгновенное значение прыгает
-    // и по нему невозможно сравнивать режимы.
     frameMsAvg_ = frameMsAvg_ * 0.94f + (deltaTime * 1000.0f) * 0.06f;
     titleTimer_ += deltaTime;
     if (titleTimer_ >= 0.25f) { titleTimer_ = 0.f; UpdateWindowTitle(); }
 
-    // ---- ДЗ №5: каскады под текущее положение камеры ----
-    // Дальность теней намеренно меньше дальней плоскости камеры (500):
-    // растягивать четыре каскада на полкилометра значит расходовать всё
-    // разрешение на геометрию, которой в кадре почти нет.
     const float kShadowDistance = 80.0f;
     CascadedShadowMap& csm = rs_->Shadows();
     if (csm.Ready() && shadowsEnabled_)
     {
-        // Отодвигаем камеру света достаточно, чтобы высокие колонны и
-        // стены Sponza попали в объём каскада и отбрасывали тень.
         csm.SetCasterDistance(60.0f);
         csm.Update(viewMatrix_, XMConvertToRadians(75.f), aspect,
             0.5f, kShadowDistance, sunDir_, 0.85f);
     }
 
-    // ---- ДЗ №6: константы системы частиц ----
-    // Базис билборда считаем здесь: разбирать транспонированную матрицу
-    // вида внутри геометрического шейдера — верный способ ошибиться.
     {
         XMMATRIX invView = XMMatrixInverse(nullptr, viewMatrix_);
         XMVECTOR r = XMVector3Normalize(invView.r[0]);
@@ -923,11 +871,7 @@ void Game::Update(float deltaTime)
         XMStoreFloat4(&particleCB_.CameraUp, u);
         XMStoreFloat4(&particleCB_.CameraForward, f);
 
-        // Костёр в атриуме Sponza, сдвинут вперёд от стартовой точки камеры.
-        // Камера стартует в (0, 5, 0) с нулевым рысканьем, а при yaw = 0
-        // вектор forward равен (0, 0, 1) — значит "вперёд" это +Z.
         particleCB_.EmitOrigin = { 0.0f, -1.6f, 4.0f, 0.0f };
-        // Слабая гравитация: горячий газ её пересиливает подъёмной силой
         particleCB_.Gravity = { 0.0f, -0.9f, 0.0f, 0.0f };
         particleCB_.DeltaTime = deltaTime;
         particleCB_.TotalTime = time_;
@@ -935,14 +879,31 @@ void Game::Update(float deltaTime)
         particleCB_.EmitSpeed = 1.5f;
         particleCB_.LifeMin = 0.8f;  particleCB_.LifeSpan = 0.9f;
         particleCB_.SizeMin = 0.10f; particleCB_.SizeSpan = 0.18f;
-        particleCB_.Turbulence = 1.4f;   // завихрения
-        particleCB_.Buoyancy = 3.6f;   // подъёмная сила пламени
-        particleCB_.SmokeLife = 3.5f;   // дым живёт заметно дольше огня
-        // Рост дыма: скорость 1/с, жёсткий потолок размера, доля пламени,
-        // переходящего в дым. Потолок обязателен — рост экспоненциальный.
+        particleCB_.Turbulence = 1.4f;
+        particleCB_.Buoyancy = 3.6f;
+        particleCB_.SmokeLife = 3.5f; 
         particleCB_.SmokeParams = { 0.5f, 0.45f, 0.30f, 0.0f };
     }
-
+    {
+        waterCB_.World = XMMatrixIdentity();
+        waterCB_.View = XMMatrixTranspose(view);
+        waterCB_.Proj = XMMatrixTranspose(proj);
+        waterCB_.CameraPos = { camPos_.x, camPos_.y, camPos_.z, 1.f };
+        waterCB_.ShallowColor = { 0.25f, 0.55f, 0.50f, 1.f };
+        waterCB_.DeepColor = { 0.02f, 0.08f, 0.12f, 1.f };
+        waterCB_.WaveDirAmp[0] = { 1.00f,  0.00f, 0.18f * waterAmpScale_, 0.25f };
+        waterCB_.WaveDirAmp[1] = { 0.60f,  0.80f, 0.10f * waterAmpScale_, 0.50f };
+        waterCB_.WaveDirAmp[2] = { -0.94f, 0.34f, 0.06f * waterAmpScale_, 1.10f };
+        waterCB_.WaveDirAmp[3] = { 0.20f, -0.98f, 0.03f * waterAmpScale_, 2.30f };
+        waterCB_.WaveSpeed = { 1.1f, 1.6f, 2.0f, 2.6f };
+        waterCB_.Time = time_;
+        waterCB_.TessNear = 2.0f; waterCB_.TessFar = 40.0f;
+        waterCB_.TessMinLevel = 1.0f;
+        waterCB_.TessMaxLevel = tessEnabled_ ? 16.0f : 1.0f;
+        waterCB_.Roughness = 0.05f;
+        waterCB_.WaveCount = 4;
+        rs_->UpdateWaterCB(waterCB_);
+    }
     LightingPassCB lCB = rs_->GetLightingCB();
     if (csm.Ready() && shadowsEnabled_)
     {
@@ -957,23 +918,16 @@ void Game::Update(float deltaTime)
     }
     else
     {
-        lCB.ShadowLightIndex = -1;   // шейдер вернёт 1.0 и тени исчезнут
+        lCB.ShadowLightIndex = -1;
     }
     lCB.CameraPos = { camPos_.x,camPos_.y,camPos_.z,1.f };
     rs_->UpdateLightingPassCB(lCB);
 
-    // CB второй модели
-    // BlendFactor: плавный переход albedo1->albedo2 с расстоянием до модели.
-    // Mesh2 всегда стоит в (0,0,0), поэтому distToCenter подходит напрямую.
-    // Вблизи (< MESH2_NEAR): blend=0 -> albedo1
-    // Вдали  (> MESH2_FAR):  blend=1 -> albedo2
     const float MESH2_NEAR = 1.5f;
     const float MESH2_FAR = 2.0f;
     float blendMesh2 = saturate01((distToCenter - MESH2_NEAR) / (MESH2_FAR - MESH2_NEAR));
 
     mesh2Rotation_ += 0.3f * deltaTime;
-    // Поворот, затем перенос: иначе модель поедет по окружности вокруг
-    // начала координат вместо вращения вокруг своей оси.
     XMMATRIX world2 = XMMatrixRotationY(mesh2Rotation_) *
         XMMatrixTranslation(mesh2Pos_.x, mesh2Pos_.y, mesh2Pos_.z);
     worldMatrix2_ = world2;
@@ -1000,11 +954,6 @@ void Game::RenderShadowCascades()
     {
         rs_->BeginShadowCascade(c, csm.ViewProj(c));
 
-        // Отсекаем по объёму КАСКАДА, а не по пирамиде камеры: объект за
-        // спиной вполне может бросать тень в кадр, но объект вне каскада
-        // не попадёт в его карту глубины при любом раскладе.
-        // Раньше Sponza рисовалась целиком во все четыре каскада — миллион
-        // треугольников за кадр против 77 тысяч у разбросанных объектов.
         if (!sponzaBounds_.empty())
         {
             const Frustum lightFrustum = Frustum::FromViewProj(csm.ViewProj(c));
@@ -1014,9 +963,6 @@ void Game::RenderShadowCascades()
                     shadowSubMeshes_.push_back(static_cast<int>(i));
             statShadowSubs_ = static_cast<int>(shadowSubMeshes_.size());
 
-            // Каждый субмеш — отдельный draw call, а их сотни. Дробить
-            // имеет смысл только когда отсекается заметная доля, иначе
-            // накладные расходы съедают выигрыш.
             const size_t half = sponzaBounds_.size() / 2;
             if (shadowSubMeshes_.size() < half)
                 rs_->DrawShadowMesh1Sub(shadowSubMeshes_);
@@ -1037,36 +983,29 @@ void Game::Render()
 {
     rs_->BeginFrame();
 
-    // ДЗ №6: шаг симуляции частиц. Идёт до геометрического прохода,
-    // потому что тот уже читает буфер частиц на отрисовке.
     if (particlesEnabled_) rs_->SimulateParticles(particleCB_);
 
-    // ДЗ №5: карты теней строятся первыми
     RenderShadowCascades();
 
-    // Geometry Pass — Mesh1 (Sponza, per-material субмеши)
     rs_->BindGeometryPass();
-    // Если границы не посчитаны (fallback-куб вместо Sponza) — рисуем всё,
-    // иначе список видимых окажется пустым и на экране не будет ничего.
     rs_->DrawMesh1SubMeshes(sponzaBounds_.empty() ? nullptr : &visibleSubMeshes_);
 
-    // Geometry Pass — Mesh2 (вторая модель)
     if (rs_->HasMesh2())
     {
         rs_->BindGeometryPassMesh2();
         rs_->DrawMesh2();
 
-        // ДЗ №4: разбросанные копии, прошедшие frustum culling.
-        // Один DrawIndexedInstanced на все видимые объекты.
         if (instancesEnabled_)
         {
             rs_->BindInstancedPass();
             rs_->DrawInstances(static_cast<UINT>(visibleObjects_.size()));
         }
     }
-
-    // ДЗ №6: частицы непрозрачные, поэтому пишутся прямо в G-buffer
-    // и получают освещение наравне с остальной геометрией.
+    if (waterEnabled_ && rs_->HasWater())
+    {
+        rs_->BindWaterPass();
+        rs_->DrawWater();
+    }
     if (particlesEnabled_) rs_->DrawParticles();
 
     rs_->BeginLightingPass();
