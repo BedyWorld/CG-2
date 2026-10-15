@@ -8,6 +8,7 @@
 #include "ObjLoader.h"
 #include "TextureLoader.h"
 #include "Types.h"
+#include "Terrain.h"
 
 static const int   MAX_BULLETS = 8;
 static const int   MAX_STUCK_LIGHTS = 6;
@@ -50,23 +51,26 @@ public:
     {
         XMFLOAT3 Position{ 0,0,0 };
         float    Scale = 1.0f;
-        float    SpinSpeed = 0.0f;   // объекты крутятся, но не перемещаются,
-        float    SpinPhase = 0.0f;   // поэтому AABB остаётся статичным
+        float    SpinSpeed = 0.0f;
+        float    SpinPhase = 0.0f;
     };
 
     std::vector<SceneObject>  objects_;
-    std::vector<AABB>         objectBounds_;    // мировые AABB, считаются один раз
+    std::vector<AABB>         objectBounds_;
     Octree                    octree_;
-    std::vector<int>          visibleObjects_;
-    std::vector<XMFLOAT4X4>   instanceMatrices_;      // видимые
-    std::vector<XMFLOAT4X4>   allInstanceMatrices_;   // все, для теней
+    static const int TERRAIN_TILES = 2;
+    Terrain terrain_[TERRAIN_TILES * TERRAIN_TILES];
+    bool terrainOnly_ = false;
+    bool lodBoostEnabled_ = false;
 
-    // Ограничивающие объёмы субмешей Sponza. Раньше вся модель рисовалась
-    // целиком каждый кадр — frustum culling её не касался вообще.
+    std::vector<int>          visibleObjects_;
+    std::vector<XMFLOAT4X4>   instanceMatrices_;
+    std::vector<XMFLOAT4X4>   allInstanceMatrices_;
+
     std::vector<AABB>         sponzaBounds_;
     std::vector<int>          visibleSubMeshes_;
     int  statSubVisible_ = 0;
-    int  statShadowSubs_ = 0;   // субмешей в последнем каскаде
+    int  statShadowSubs_ = 0;
     std::vector<int> shadowSubMeshes_;
     float frameMsAvg_ = 16.0f;
     int  statSubTotal_ = 0;

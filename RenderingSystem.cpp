@@ -42,6 +42,9 @@ void RenderingSystem::Initialize()
     CreateLightingPassPSO();
     CreateWaterPassRootSignature();
     CreateWaterPSO();
+    CreateTerrainRootSignature();
+    CreateTerrainPSO();
+    BuildTerrainGrid();
 }
 
 void RenderingSystem::BeginResourceUpload()
@@ -1483,6 +1486,10 @@ void RenderingSystem::CreateConstantBuffers()
     make(waterCBStride_ * RS_FRAME_COUNT, waterCB_);
     ThrowIfFailed(waterCB_->Map(0, nullptr, reinterpret_cast<void**>(&waterCBMapped_)));
 
+    terrainCBStride_ = Align256(sizeof(TerrainCB));
+    make(terrainCBStride_ * RS_FRAME_COUNT * MAX_TERRAIN_TILES, terrainCB_);
+    ThrowIfFailed(terrainCB_->Map(0, nullptr, reinterpret_cast<void**>(&terrainCBMapped_)));
+
     shadows_.Create(device_.Get(), srvHeap_.Get(), SRV_SHADOWMAP, srvDescSize_);
     particles_.Create(device_.Get(), srvHeap_.Get(), SRV_PARTICLES, srvDescSize_);
 }
@@ -1673,4 +1680,341 @@ void RenderingSystem::MoveToNextFrame()
         WaitForSingleObject(fenceEvent_, INFINITE);
     }
     fenceValues_[frameIndex_] = cur + 1;
+}
+
+//Terrain!!!
+
+static const char* kTerrainShaderSrc = R"HLSL(
+cbuffer TerrainCB : register(b0)
+{
+    matrix View;
+    matrix Proj;
+    float4 CameraPos;
+    float  OriginX;
+    float  OriginZ;
+    float  OriginY;
+    float  HeightScale;
+    float  WireMode;
+    float  MapSize;
+    float  LodBoost;
+    float  MaxLevel;
+};
+cbuffer NodeCB : register(b1)
+{
+    float NodeX;
+    float NodeZ;
+    float NodeSize;
+    float NodeLevel;
+};
+
+Texture2D<float> gHeight : register(t0);
+
+struct VSInput { float3 Pos:POSITION; float3 Normal:NORMAL; float4 Color:COLOR; float2 TexCoord:TEXCOORD0; };
+struct VSOut   { float4 Pos:SV_POSITION; float3 PosWS:TEXCOORD0; float3 Normal:TEXCOORD1; float Level:TEXCOORD2; };
+
+// Высота 0..1 в клетке (x, z). Load вместо Sample: без фильтрации, точное значение.
+float HeightAt(int x, int z)
+{
+    int last = (int)MapSize - 1;
+    return gHeight.Load(int3(clamp(x, 0, last), clamp(z, 0, last), 0));
+}
+
+VSOut VSMain(VSInput i)
+{
+    VSOut o;
+    float cx = NodeX + i.Pos.x * NodeSize;
+    float cz = NodeZ + i.Pos.z * NodeSize;
+    int ix = (int)(cx + 0.5f);
+    int iz = (int)(cz + 0.5f);
+
+    float h = HeightAt(ix, iz);
+
+    // нормаль по соседним клеткам; у крупных узлов шаг больше
+    int step = max(1, (int)(NodeSize / 32.0f + 0.5f));
+    float hL = HeightAt(ix - step, iz);
+    float hR = HeightAt(ix + step, iz);
+    float hD = HeightAt(ix, iz - step);
+    float hU = HeightAt(ix, iz + step);
+
+    float boost = 1.0f + LodBoost * (MaxLevel - NodeLevel) / max(MaxLevel, 1.0f);
+    float hScale = HeightScale * boost;
+//баянчики4
+    float3 posWS = float3(cx + OriginX, h * hScale + OriginY, cz + OriginZ);
+
+    o.PosWS  = posWS;
+    o.Normal = normalize(float3((hL - hR) * hScale, 2.0f * step, (hD - hU) * hScale));
+    o.Level  = NodeLevel;
+    o.Pos    = mul(mul(float4(posWS, 1.0f), View), Proj);
+    return o;
+}
+
+struct PSOut { float4 Albedo:SV_Target0; float4 Normal:SV_Target1; float4 PBR:SV_Target2; float4 WorldPos:SV_Target3; };
+
+static const float3 kLevelColor[6] = {
+    float3(1.00f, 0.20f, 0.20f),
+    float3(1.00f, 0.60f, 0.10f),
+    float3(0.95f, 0.90f, 0.20f),
+    float3(0.30f, 0.80f, 0.30f),
+    float3(0.20f, 0.80f, 0.90f),
+    float3(0.30f, 0.40f, 1.00f)
+};
+
+PSOut PSMain(VSOut i)
+{
+    PSOut o;
+    int lv = clamp((int)(i.Level + 0.5f), 0, 5);
+    float3 col = kLevelColor[lv];
+
+    o.Albedo = float4(col, 1.0f);
+    o.Normal = float4(normalize(i.Normal), 0.0f);
+    if (WireMode > 0.5f)
+        o.PBR = float4(0.6f, 1.0f, 1.0f, 1.0f);   // metallic>0.5 = эмиссия
+    else
+        o.PBR = float4(0.9f, 0.0f, 1.0f, 1.0f);
+    o.WorldPos = float4(i.PosWS, 1.0f);
+    return o;
+}
+)HLSL";
+
+void RenderingSystem::CreateTerrainRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE heightRange = {};
+    heightRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    heightRange.NumDescriptors = 1;
+    heightRange.BaseShaderRegister = 0;      // t0
+    heightRange.RegisterSpace = 0;
+    heightRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER params[3] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;            // b0
+    params[0].Descriptor.ShaderRegister = 0;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; // b1
+    params[1].Constants.ShaderRegister = 1;
+    params[1].Constants.RegisterSpace = 0;
+    params[1].Constants.Num32BitValues = 4;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; // t0
+    params[2].DescriptorTable.NumDescriptorRanges = 1;
+    params[2].DescriptorTable.pDescriptorRanges = &heightRange;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters = 3; desc.pParameters = params;
+    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> sig, err;
+    ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
+    ThrowIfFailed(device_->CreateRootSignature(0, sig->GetBufferPointer(),
+        sig->GetBufferSize(), IID_PPV_ARGS(&terrainRootSig_)));
+}
+
+void RenderingSystem::CreateTerrainPSO()
+{
+    auto vs = CompileShader(kTerrainShaderSrc, "VSMain", "vs_5_0");
+    auto ps = CompileShader(kTerrainShaderSrc, "PSMain", "ps_5_0");
+
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,   0, 0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"NORMAL",  0,DXGI_FORMAT_R32G32B32_FLOAT,   0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"COLOR",   0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,24,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,      0,40,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+    };
+    D3D12_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D12_FILL_MODE_SOLID;
+    raster.CullMode = D3D12_CULL_MODE_NONE;
+    raster.DepthClipEnable = TRUE;
+
+    D3D12_DEPTH_STENCIL_DESC dss = {};
+    dss.DepthEnable = TRUE;
+    dss.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    dss.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+
+    D3D12_BLEND_DESC blend = {};
+    for (UINT i = 0; i < GBUFFER_RT_COUNT; ++i)
+        blend.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = terrainRootSig_.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.InputLayout = { layout, _countof(layout) };
+    pso.RasterizerState = raster;
+    pso.DepthStencilState = dss;
+    pso.BlendState = blend;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = GBUFFER_RT_COUNT;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pso.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.SampleDesc = { 1,0 };
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&terrainPSO_)));
+
+    raster.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    pso.RasterizerState = raster;
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&terrainWirePSO_)));
+}
+
+void RenderingSystem::BuildTerrainGrid()
+{
+    const int N = 32;   // 32x32 cells = 33x33 vertices
+
+    std::vector<Vertex> verts;
+    std::vector<UINT>   idxs;
+    verts.reserve((N + 1) * (N + 1));
+
+    for (int z = 0; z <= N; ++z)
+    {
+        for (int x = 0; x <= N; ++x)
+        {
+            Vertex v = {};
+            v.Position = { float(x) / N, 0.0f, float(z) / N };
+            v.Normal = { 0.0f, 1.0f, 0.0f };
+            v.Color = { 1.0f, 1.0f, 1.0f, 1.0f };
+            v.TexCoord = { float(x) / N, float(z) / N };
+            verts.push_back(v);
+        }
+    }
+
+    auto IDX = [&](int x, int z) { return (UINT)(z * (N + 1) + x); };
+    for (int z = 0; z < N; ++z)
+    {
+        for (int x = 0; x < N; ++x)
+        {
+            UINT a = IDX(x, z), b = IDX(x + 1, z), c = IDX(x + 1, z + 1), d = IDX(x, z + 1);
+            idxs.insert(idxs.end(), { a, b, c, a, c, d });
+        }
+    }
+
+    indexCountTerrain_ = (UINT)idxs.size();
+    MakeUploadBuffer(verts.data(), verts.size() * sizeof(Vertex), terrainVB_);
+    vbViewTerrain_.BufferLocation = terrainVB_->GetGPUVirtualAddress();
+    vbViewTerrain_.SizeInBytes = (UINT)(verts.size() * sizeof(Vertex));
+    vbViewTerrain_.StrideInBytes = sizeof(Vertex);
+    MakeUploadBuffer(idxs.data(), idxs.size() * sizeof(UINT), terrainIB_);
+    ibViewTerrain_.BufferLocation = terrainIB_->GetGPUVirtualAddress();
+    ibViewTerrain_.SizeInBytes = (UINT)(idxs.size() * sizeof(UINT));
+    ibViewTerrain_.Format = DXGI_FORMAT_R32_UINT;
+}
+
+void RenderingSystem::UpdateTerrainCB(int tile, const TerrainCB& data)
+{
+    if (!terrainCBMapped_ || tile < 0 || tile >= MAX_TERRAIN_TILES) return;
+    memcpy(terrainCBMapped_ + ((size_t)frameIndex_ * MAX_TERRAIN_TILES + tile) * terrainCBStride_,
+        &data, sizeof(data));
+}
+
+void RenderingSystem::BindTerrainPass()
+{
+    if (indexCountTerrain_ == 0 || terrainTileCount_ == 0) return;
+    commandList_->SetGraphicsRootSignature(terrainRootSig_.Get());
+    commandList_->SetPipelineState(
+        (wireframe_ && terrainWirePSO_) ? terrainWirePSO_.Get() : terrainPSO_.Get());
+    ID3D12DescriptorHeap* heaps[] = { srvHeap_.Get() };
+    commandList_->SetDescriptorHeaps(1, heaps);
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList_->IASetVertexBuffers(0, 1, &vbViewTerrain_);
+    commandList_->IASetIndexBuffer(&ibViewTerrain_);
+}
+
+void RenderingSystem::BindTerrainTile(int tile)
+{
+    if (indexCountTerrain_ == 0 || tile < 0 || tile >= terrainTileCount_) return;
+    commandList_->SetGraphicsRootConstantBufferView(0,
+        terrainCB_->GetGPUVirtualAddress()
+        + ((UINT64)frameIndex_ * MAX_TERRAIN_TILES + tile) * terrainCBStride_);
+    commandList_->SetGraphicsRootDescriptorTable(2, GpuHandle(terrainHeightSlot_[tile]));
+}
+
+void RenderingSystem::DrawTerrainNode(float x, float z, float size, float level)
+{
+    if (indexCountTerrain_ == 0 || terrainTileCount_ == 0) return;
+    const float values[4] = { x, z, size, level };
+    commandList_->SetGraphicsRoot32BitConstants(1, 4, values, 0);
+    commandList_->DrawIndexedInstanced(indexCountTerrain_, 1, 0, 0, 0);
+}
+
+int RenderingSystem::CreateTerrainHeightmap(const std::vector<float>& heights, int mapSize)
+{
+    if (terrainTileCount_ >= MAX_TERRAIN_TILES)
+        ThrowIfFailed(E_FAIL, "too many terrain tiles");
+    if (mapSize <= 0 || (int)heights.size() != mapSize * mapSize)
+        ThrowIfFailed(E_FAIL, "CreateTerrainHeightmap: bad size");
+    if (srvNextFree_ >= SRV_HEAP_SIZE)
+        ThrowIfFailed(E_FAIL, "SRV heap overflow");
+
+    std::vector<uint16_t> texels(heights.size());
+    for (size_t i = 0; i < heights.size(); ++i)
+    {
+        float h = heights[i];
+        if (h < 0.0f) h = 0.0f;
+        if (h > 1.0f) h = 1.0f;
+        texels[i] = (uint16_t)(h * 65535.0f + 0.5f);
+    }
+
+    WaitForGPU();
+
+    D3D12_HEAP_PROPERTIES defHP = {}; defHP.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = mapSize; texDesc.Height = mapSize;
+    texDesc.DepthOrArraySize = 1; texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R16_UNORM; texDesc.SampleDesc = { 1,0 };
+
+    ComPtr<ID3D12Resource> tex, upload;
+    ThrowIfFailed(device_->CreateCommittedResource(&defHP, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex)));
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    UINT64 uploadSize = 0;
+    device_->GetCopyableFootprints(&texDesc, 0, 1, 0, &fp, nullptr, nullptr, &uploadSize);
+
+    D3D12_HEAP_PROPERTIES upHP = {}; upHP.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC upDesc = {};
+    upDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; upDesc.Width = uploadSize;
+    upDesc.Height = upDesc.DepthOrArraySize = upDesc.MipLevels = 1;
+    upDesc.Format = DXGI_FORMAT_UNKNOWN; upDesc.SampleDesc = { 1,0 };
+    upDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ThrowIfFailed(device_->CreateCommittedResource(&upHP, D3D12_HEAP_FLAG_NONE, &upDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)));
+
+    BYTE* mapped = nullptr;
+    ThrowIfFailed(upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)));
+    for (int row = 0; row < mapSize; ++row)
+        memcpy(mapped + (size_t)row * fp.Footprint.RowPitch,
+            texels.data() + (size_t)row * mapSize, (size_t)mapSize * sizeof(uint16_t));
+    upload->Unmap(0, nullptr);
+
+    ThrowIfFailed(commandAllocators_[0]->Reset());
+    ThrowIfFailed(commandList_->Reset(commandAllocators_[0].Get(), nullptr));
+
+    D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+    dst.pResource = tex.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.pResource = upload.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = fp;
+    commandList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = tex.Get();
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    commandList_->ResourceBarrier(1, &b);
+
+    ThrowIfFailed(commandList_->Close());
+    ID3D12CommandList* lists[] = { commandList_.Get() };
+    commandQueue_->ExecuteCommandLists(1, lists);
+    WaitForGPU();
+
+    int tile = terrainTileCount_++;
+    terrainHeightSlot_[tile] = srvNextFree_++;
+    CreateSRVInSlot(tex.Get(), DXGI_FORMAT_R16_UNORM, terrainHeightSlot_[tile]);
+    terrainHeightTex_[tile] = tex;
+    return tile;
 }

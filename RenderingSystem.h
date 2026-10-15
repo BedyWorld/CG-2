@@ -54,7 +54,15 @@ public:
     void BindWaterPass();
     void DrawWater();
     bool HasWater() const { return indexCountWater_ > 0; }
+    void BuildTerrainGrid();
+    void UpdateTerrainCB(int tile, const TerrainCB& data);
+    void BindTerrainPass();
+    void BindTerrainTile(int tile);
+    void DrawTerrainNode(float x, float z, float size, float level);
 
+    int  CreateTerrainHeightmap(const std::vector<float>& heights, int mapSize);
+    bool HasTerrain() const { return indexCountTerrain_ > 0 && terrainTileCount_ > 0; }
+    static const int MAX_TERRAIN_TILES = 16;
     
     void BuildMesh1(const std::vector<Vertex>& verts,
         const std::vector<UINT>& idxs,
@@ -135,6 +143,8 @@ public:
 private:
     void CreateWaterPassRootSignature();
     void CreateWaterPSO();
+    void CreateTerrainRootSignature();
+    void CreateTerrainPSO();
     void CreateDevice();
     void CreateCommandQueue();
     void CreateSwapChain();
@@ -206,6 +216,23 @@ private:
     D3D12_VERTEX_BUFFER_VIEW          vbViewWater_ = {};
     D3D12_INDEX_BUFFER_VIEW           ibViewWater_ = {};
     UINT                              indexCountWater_ = 0;
+
+    ComPtr<ID3D12Resource>            terrainVB_, terrainIB_;
+    D3D12_VERTEX_BUFFER_VIEW          vbViewTerrain_ = {};
+    D3D12_INDEX_BUFFER_VIEW           ibViewTerrain_ = {};
+    UINT                              indexCountTerrain_ = 0;
+    ComPtr<ID3D12RootSignature>       terrainRootSig_;
+    ComPtr<ID3D12PipelineState>       terrainPSO_;
+    ComPtr<ID3D12PipelineState>       terrainWirePSO_;
+    ComPtr<ID3D12Resource>            terrainCB_;
+
+    ComPtr<ID3D12Resource> terrainHeightTex_[MAX_TERRAIN_TILES];
+    int                    terrainHeightSlot_[MAX_TERRAIN_TILES] = {};
+    int                    terrainTileCount_ = 0;
+    
+    BYTE* terrainCBMapped_ = nullptr;
+    UINT64                            terrainCBStride_ = 0;
+
     ComPtr<ID3D12RootSignature>       waterRootSig_;
     ComPtr<ID3D12PipelineState>       waterPSO_;
     ComPtr<ID3D12Resource>            waterCB_;

@@ -7,6 +7,8 @@
 #include <random>
 #include <unordered_map>
 
+static const float kTileSize = 1024.0f;
+static const float kLodBoost = 1.0f;
 static constexpr float PI = 3.14159265f;
 
 static inline XMFLOAT3 F3Add(XMFLOAT3 a, XMFLOAT3 b) { return { a.x + b.x,a.y + b.y,a.z + b.z }; }
@@ -38,6 +40,43 @@ bool Game::Initialize()
         rs_->ReleaseTextureUploadBuffers();
         { LoadTimer t("CB + тени + частицы"); rs_->CreateConstantBuffers(); }
         { LoadTimer t("октодерево (300 объектов)"); BuildSceneObjects(); }
+        
+        {
+            LoadTimer t("terrain");
+
+            char exePath[MAX_PATH];
+            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+            std::string dir = exePath;
+            dir = dir.substr(0, dir.find_last_of("\\/") + 1);
+
+            for (int tz = 0; tz < TERRAIN_TILES; ++tz)
+            {
+                for (int tx = 0; tx < TERRAIN_TILES; ++tx)
+                {
+                    int idx = tz * TERRAIN_TILES + tx;
+                    Terrain& tile = terrain_[idx];
+
+                    char name[64];
+                    sprintf_s(name, "terrain_%d_%d.r16", tx, tz);
+
+                    bool loaded = tile.LoadRaw16((dir + name).c_str());
+                    if (!loaded) loaded = tile.LoadRaw16(name);
+                    if (!loaded) tile.BuildFake(1025);
+
+                    char msg[128];
+                    sprintf_s(msg, "tile %d,%d: %s\n", tx, tz, loaded ? "file" : "FAKE (file not found)");
+                    OutputDebugStringA(msg);
+
+                    float worldMin = -0.5f * TERRAIN_TILES * kTileSize;
+                    tile.SetOrigin(worldMin + tx * kTileSize, worldMin + tz * kTileSize);
+                    tile.BuildQuadtree();
+
+                    rs_->CreateTerrainHeightmap(tile.Heights(), tile.MapSize());
+                }
+            }
+            terrain_[0].PrintStats();
+        }
+
         { LoadTimer t("плоскость воды"); BuildWaterPlane(); }
         return true;
     }
@@ -91,9 +130,11 @@ void Game::OnMouseDown(int button)
 void Game::OnKeyDown(int vkey)
 {
     if (vkey == VK_ESCAPE) { ReleaseMouse(); return; }
+    if (vkey == 'H') { terrainOnly_ = !terrainOnly_; return; }
     if (vkey == 'R') { ClearStuckLights(); return; }
     if (vkey == 'B') { waterEnabled_ = !waterEnabled_; return; }
     if (vkey == 'F') { ToggleFrustumCulling(); return; }
+    if (vkey == 'L') { lodBoostEnabled_ = !lodBoostEnabled_; return; }
     if (vkey == 'O') { ToggleOctreeCulling();  return; }
     if (vkey == VK_OEM_PLUS || vkey == VK_ADD)       waterAmpScale_ = min(waterAmpScale_ + 0.1f, 3.0f);
     if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) waterAmpScale_ = max(waterAmpScale_ - 0.1f, 0.0f);
@@ -771,7 +812,8 @@ void Game::Update(float deltaTime)
     XMFLOAT3 right = F3Norm(F3Cross(forward, { 0,1,0 }));
     XMFLOAT3 up = F3Norm(F3Cross(right, forward));
 
-    const float speed = 5.0f;
+    float speed = 5.0f;
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) speed *= 20.0f;
     if (GetAsyncKeyState('W') & 0x8000) camPos_ = F3Add(camPos_, F3Scale(forward, speed * deltaTime));
     if (GetAsyncKeyState('S') & 0x8000) camPos_ = F3Sub(camPos_, F3Scale(forward, speed * deltaTime));
     if (GetAsyncKeyState('A') & 0x8000) camPos_ = F3Add(camPos_, F3Scale(right, speed * deltaTime));
@@ -796,8 +838,31 @@ void Game::Update(float deltaTime)
     XMFLOAT3 targetF = F3Add(camPos_, forward);
     XMMATRIX view = XMMatrixLookAtLH(eyeV, XMLoadFloat3(&targetF), XMLoadFloat3(&up));
     float aspect = (height_ > 0) ? float(width_) / float(height_) : 1.f;
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(75.f), aspect, 0.05f, 500.f);
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(75.f), aspect, 0.05f, 3000.f);
+    {
+        XMFLOAT4X4 vp;
+        XMStoreFloat4x4(&vp, view * proj);
+        Terrain::SetLodBoost(lodBoostEnabled_ ? kLodBoost : 0.0f);
+        for (int i = 0; i < TERRAIN_TILES * TERRAIN_TILES; ++i)
+        {
+            Terrain& tile = terrain_[i];
+            tile.Select(camPos_.x, camPos_.y, camPos_.z, &vp._11);
 
+            TerrainCB tcb = {};
+            tcb.View = XMMatrixTranspose(view);
+            tcb.Proj = XMMatrixTranspose(proj);
+            tcb.CameraPos = { camPos_.x, camPos_.y, camPos_.z, 1.f };
+            tcb.OriginX = tile.OriginX();
+            tcb.OriginZ = tile.OriginZ();
+            tcb.OriginY = Terrain::OriginY();
+            tcb.HeightScale = Terrain::HeightScale();
+            tcb.WireMode = wireframe_ ? 1.0f : 0.0f;
+            tcb.MapSize = (float)tile.MapSize();
+            tcb.LodBoost = Terrain::LodBoost();
+            tcb.MaxLevel = (float)tile.MaxLevel();
+            rs_->UpdateTerrainCB(i, tcb);
+        }
+    }
     const float DIST_NEAR = 1.0f, DIST_FAR = 20.0f;
     float distToCenter = sqrtf(camPos_.x * camPos_.x + camPos_.y * camPos_.y + camPos_.z * camPos_.z);
     float t = saturate01((distToCenter - DIST_NEAR) / (DIST_FAR - DIST_NEAR));
@@ -988,9 +1053,10 @@ void Game::Render()
     RenderShadowCascades();
 
     rs_->BindGeometryPass();
-    rs_->DrawMesh1SubMeshes(sponzaBounds_.empty() ? nullptr : &visibleSubMeshes_);
+    if (!terrainOnly_)
+        rs_->DrawMesh1SubMeshes(sponzaBounds_.empty() ? nullptr : &visibleSubMeshes_);
 
-    if (rs_->HasMesh2())
+    if (rs_->HasMesh2() && !terrainOnly_)
     {
         rs_->BindGeometryPassMesh2();
         rs_->DrawMesh2();
@@ -1001,12 +1067,28 @@ void Game::Render()
             rs_->DrawInstances(static_cast<UINT>(visibleObjects_.size()));
         }
     }
-    if (waterEnabled_ && rs_->HasWater())
+    if (waterEnabled_ && rs_->HasWater() && !terrainOnly_)
     {
         rs_->BindWaterPass();
         rs_->DrawWater();
     }
-    if (particlesEnabled_) rs_->DrawParticles();
+
+    if (rs_->HasTerrain())
+    {
+        rs_->BindTerrainPass();
+        for (int i = 0; i < TERRAIN_TILES * TERRAIN_TILES; ++i)
+        {
+            rs_->BindTerrainTile(i);
+            const Terrain& tile = terrain_[i];
+            for (int k = 0; k < tile.VisibleCount(); ++k)
+            {
+                const TerrainNode& n = tile.VisibleNode(k);
+                rs_->DrawTerrainNode((float)n.x, (float)n.z, (float)n.size, (float)n.level);
+            }
+        }
+    }
+
+    if (particlesEnabled_ && !terrainOnly_) rs_->DrawParticles();
 
     rs_->BeginLightingPass();
     rs_->DrawLightingQuad();

@@ -28,6 +28,7 @@
     <ClCompile Include="ParticleSystem.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
     <ClCompile Include="ShadowMap.cpp" />
+    <ClCompile Include="Terrain.cpp" />
     <ClCompile Include="TextureLoader.cpp" />
     <ClCompile Include="Window.cpp" />
   </ItemGroup>
@@ -35,6 +36,7 @@
     <ClInclude Include="Culling.h" />
     <ClInclude Include="Game.h" />
     <ClInclude Include="GBuffer.h" />
+    <ClInclude Include="Terrain.h" />
     <ClInclude Include="InputDevice.h" />
     <ClInclude Include="ObjLoader.h" />
     <ClInclude Include="ParticleSystem.h" />

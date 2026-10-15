@@ -33,6 +33,21 @@ struct WaterCB
     float    _pad;
 };
 
+struct TerrainCB
+{
+    XMMATRIX View;
+    XMMATRIX Proj;
+    XMFLOAT4 CameraPos;
+    float    OriginX;
+    float    OriginZ;
+    float    OriginY;
+    float    HeightScale;
+    float    WireMode;
+    float    MapSize;
+    float    LodBoost;
+    float    MaxLevel;
+};
+
 enum class LightType : UINT
 {
     Directional = 0,
@@ -117,3 +132,4 @@ static_assert(sizeof(LightingPassCB) == 1408, "изменился размер L
 static_assert(offsetof(ConstantBufferData, CameraPos) == 192, "ConstantBufferData: CameraPos");
 static_assert(offsetof(ConstantBufferData, BlendFactor) == 224, "ConstantBufferData: BlendFactor");
 static_assert(sizeof(ConstantBufferData) == 256, "изменился размер ConstantBufferData");
+static_assert(sizeof(TerrainCB) == 176, "TerrainCB size changed");
