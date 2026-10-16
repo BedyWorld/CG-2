@@ -7,6 +7,8 @@
 #include <random>
 #include <unordered_map>
 
+
+static const float kTaaAlphas[4] = { 0.05f, 0.10f, 0.20f, 1.00f };
 static const float kTileSize = 1024.0f;
 static const float kLodBoost = 1.0f;
 static constexpr float PI = 3.14159265f;
@@ -139,7 +141,8 @@ void Game::OnKeyDown(int vkey)
     if (vkey == VK_OEM_PLUS || vkey == VK_ADD)       waterAmpScale_ = min(waterAmpScale_ + 0.1f, 3.0f);
     if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) waterAmpScale_ = max(waterAmpScale_ - 0.1f, 0.0f);
     if (vkey == 'T') { tessEnabled_ = !tessEnabled_; return; }
-    if (vkey == 'J') { taaEnabled_ = !taaEnabled_; return; }
+    if (vkey == 'J') { taaEnabled_ = !taaEnabled_; rs_->SetTaaEnabled(taaEnabled_); return; }
+    if (vkey == 'K') { taaAlphaIdx_ = (taaAlphaIdx_ + 1) % 4; rs_->SetTaaAlpha(kTaaAlphas[taaAlphaIdx_]); return; }
     if (vkey == 'V') { rs_->ToggleTaaDebug(); return; }
     if (vkey == 'C') { shadowsEnabled_ = !shadowsEnabled_; return; }
     if (vkey == 'P') { particlesEnabled_ = !particlesEnabled_; return; }
@@ -794,7 +797,8 @@ void Game::UpdateWindowTitle()
         shadowsEnabled_ ? L"on" : L"off",
         particlesEnabled_ ? L"on" : L"off",
         wireframe_ ? L"on" : L"off",
-        taaEnabled_ ? L"on" : L"off");
+        taaEnabled_ ? L"on" : L"off",
+        kTaaAlphas[taaAlphaIdx_]);
     SetWindowTextW(hwnd_, buf);
 }
 //баяночник 1 холтон
@@ -868,7 +872,8 @@ void Game::Update(float deltaTime)
         const int idx = (int)(taaFrame_ % 8) + 1;
         taaJitter_.x = (2.0f * Halton(idx, 2) - 1.0f) / (float)width_;
         taaJitter_.y = (2.0f * Halton(idx, 3) - 1.0f) / (float)height_;
-        proj.r[2] = XMVectorAdd(proj.r[2], XMVectorSet(taaJitter_.x * 20.f, taaJitter_.y * 20.f, 0.f, 0.f));
+        //proj.r[2] = XMVectorAdd(proj.r[2], XMVectorSet(taaJitter_.x * 20.f, taaJitter_.y * 20.f, 0.f, 0.f));
+        proj.r[2] = XMVectorAdd(proj.r[2], XMVectorSet(taaJitter_.x, taaJitter_.y, 0.f, 0.f));
     }
     else
     {

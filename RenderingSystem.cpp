@@ -1947,11 +1947,11 @@ void RenderingSystem::EndFrame()
         commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(SRV_TAA_HIST + prev));
         commandList_->SetGraphicsRootDescriptorTable(2, gbuffer_.GetSRVGpuStart());   // G-buffer: t2..t5
         float taaConsts[36] = {};
-        taaConsts[34] = taaDebug_ ? 1.0f : 0.0f;
         memcpy(taaConsts, &taaCurrVP_, sizeof(XMFLOAT4X4));
         memcpy(taaConsts + 16, &taaPrevVP_, sizeof(XMFLOAT4X4));
-        taaConsts[32] = 0.1f;
+        taaConsts[32] = taaAlpha_;
         taaConsts[33] = taaHistoryValid_ ? 1.0f : 0.0f;
+        taaConsts[34] = taaDebug_ ? 1.0f : 0.0f; 
         commandList_->SetGraphicsRoot32BitConstants(3, 36, taaConsts, 0);
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         commandList_->DrawInstanced(3, 1, 0, 0);

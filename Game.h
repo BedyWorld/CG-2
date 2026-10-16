@@ -161,6 +161,7 @@ private:
     XMMATRIX projMatrix_ = {};
 
     bool taaEnabled_ = true;
+    int  taaAlphaIdx_ = 1;
     UINT taaFrame_ = 0;
     XMFLOAT2 taaJitter_ = { 0.f, 0.f };
     XMFLOAT2 taaPrevJitter_ = { 0.f, 0.f };

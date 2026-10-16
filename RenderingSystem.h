@@ -122,6 +122,8 @@ public:
     {
         taaCurrVP_ = curr; taaPrevVP_ = prev;
     }
+    void SetTaaEnabled(bool on) { taaEnabled_ = on; }
+    void SetTaaAlpha(float a) { taaAlpha_ = a; }
     void ToggleTaaDebug() { taaDebug_ = !taaDebug_; }
     void BindGeometryPass();        // биндит PSO, CB1, общие текстуры
     // visible == nullptr -> рисуем все субмеши (culling выключен).
@@ -299,6 +301,7 @@ private:
     bool                              taaHistoryValid_ = false;
     bool                              taaEnabled_ = true;
     bool                              taaDebug_ = false;
+    float                             taaAlpha_ = 0.1f;
     XMFLOAT4X4                        taaCurrVP_ = {};
     XMFLOAT4X4                        taaPrevVP_ = {};
 
