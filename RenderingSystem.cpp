@@ -1104,6 +1104,7 @@ cbuffer TaaCB : register(b0)
     row_major float4x4 PrevVP;
     float  Alpha;
     float  HistoryValid;
+    float  DebugMode;
     float2 Pad;
 };
 
@@ -1144,6 +1145,9 @@ float4 PSMain(VSOut i) : SV_TARGET
             velocity = (cNdc - qNdc) * float2(0.5f, -0.5f);
         }
     }
+    if (DebugMode > 0.5f)
+        return float4(abs(velocity) * 400.0f, 0.0f, 1.0f);    
+
 
     float2 histUV = uv - velocity;
     if (any(histUV < 0.0f) || any(histUV > 1.0f))
@@ -1928,6 +1932,7 @@ void RenderingSystem::EndFrame()
         commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(SRV_TAA_HIST + prev));
         commandList_->SetGraphicsRootDescriptorTable(2, gbuffer_.GetSRVGpuStart());   // G-buffer: t2..t5
         float taaConsts[36] = {};
+        taaConsts[34] = taaDebug_ ? 1.0f : 0.0f;
         memcpy(taaConsts, &taaCurrVP_, sizeof(XMFLOAT4X4));
         memcpy(taaConsts + 16, &taaPrevVP_, sizeof(XMFLOAT4X4));
         taaConsts[32] = 0.1f;

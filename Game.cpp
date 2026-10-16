@@ -140,6 +140,7 @@ void Game::OnKeyDown(int vkey)
     if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) waterAmpScale_ = max(waterAmpScale_ - 0.1f, 0.0f);
     if (vkey == 'T') { tessEnabled_ = !tessEnabled_; return; }
     if (vkey == 'J') { taaEnabled_ = !taaEnabled_; return; }
+    if (vkey == 'V') { rs_->ToggleTaaDebug(); return; }
     if (vkey == 'C') { shadowsEnabled_ = !shadowsEnabled_; return; }
     if (vkey == 'P') { particlesEnabled_ = !particlesEnabled_; return; }
     if (vkey == 'G') {

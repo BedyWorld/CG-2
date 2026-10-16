@@ -122,7 +122,7 @@ public:
     {
         taaCurrVP_ = curr; taaPrevVP_ = prev;
     }
-
+    void ToggleTaaDebug() { taaDebug_ = !taaDebug_; }
     void BindGeometryPass();        // биндит PSO, CB1, общие текстуры
     // visible == nullptr -> рисуем все субмеши (culling выключен).
     // Иначе — только перечисленные, прошедшие frustum culling.
@@ -298,6 +298,7 @@ private:
     int                               taaCur_ = 0;
     bool                              taaHistoryValid_ = false;
     bool                              taaEnabled_ = true;
+    bool                              taaDebug_ = false;
     XMFLOAT4X4                        taaCurrVP_ = {};
     XMFLOAT4X4                        taaPrevVP_ = {};
 
