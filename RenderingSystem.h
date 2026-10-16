@@ -63,7 +63,7 @@ public:
     int  CreateTerrainHeightmap(const std::vector<float>& heights, int mapSize);
     bool HasTerrain() const { return indexCountTerrain_ > 0 && terrainTileCount_ > 0; }
     static const int MAX_TERRAIN_TILES = 16;
-    
+
     void BuildMesh1(const std::vector<Vertex>& verts,
         const std::vector<UINT>& idxs,
         const std::vector<UINT>& subIndexStarts,
@@ -104,7 +104,7 @@ public:
     //каскадные карты теней
     CascadedShadowMap& Shadows() { return shadows_; }
     void BeginShadowCascade(int cascade, const XMFLOAT4X4& lightViewProj);
-    void DrawShadowMesh1();                    
+    void DrawShadowMesh1();
     void DrawShadowMesh1Sub(const std::vector<int>& visible);
     void DrawShadowInstances(UINT instanceCount); // разбросанные объекты
     void EndShadowPass();
@@ -117,6 +117,8 @@ public:
     // Каркасный режим: видно результат тесселяции
     void SetWireframe(bool on) { wireframe_ = on; }
     bool IsWireframe() const { return wireframe_; }
+
+    void SetTaaEnabled(bool on) { taaEnabled_ = on; }
 
     void BindGeometryPass();        // биндит PSO, CB1, общие текстуры
     // visible == nullptr -> рисуем все субмеши (culling выключен).
@@ -158,6 +160,9 @@ private:
     void CreateSceneHDR();
     void CreatePostRootSignature();
     void CreateTonemapPSO();
+    void CreateTaaHistory();
+    void CreateTaaRootSignature();
+    void CreateTaaPSO();
     void CreateGeometryPassPSO();
     void CreateInstancedPSO();
     void CreateShadowPassRootSignature();
@@ -232,7 +237,7 @@ private:
     ComPtr<ID3D12Resource> terrainHeightTex_[MAX_TERRAIN_TILES];
     int                    terrainHeightSlot_[MAX_TERRAIN_TILES] = {};
     int                    terrainTileCount_ = 0;
-    
+
     BYTE* terrainCBMapped_ = nullptr;
     UINT64                            terrainCBStride_ = 0;
 
@@ -281,6 +286,15 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE       sceneHdrRtv_ = {};
     ComPtr<ID3D12RootSignature>       postRootSig_;
     ComPtr<ID3D12PipelineState>       tonemapPSO_;
+
+    static const int SRV_TAA_HIST = SRV_HEAP_SIZE - 3;
+    ComPtr<ID3D12Resource>            taaHist_[2];
+    D3D12_CPU_DESCRIPTOR_HANDLE       taaRtv_[2] = {};
+    ComPtr<ID3D12RootSignature>       taaRootSig_;
+    ComPtr<ID3D12PipelineState>       taaPSO_;
+    int                               taaCur_ = 0;
+    bool                              taaHistoryValid_ = false;
+    bool                              taaEnabled_ = true;
 
 
     // ---- Mesh1 ----

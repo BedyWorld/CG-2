@@ -42,6 +42,8 @@ void RenderingSystem::Initialize()
     CreateLightingPassPSO();
     CreatePostRootSignature();
     CreateTonemapPSO();
+    CreateTaaRootSignature();
+    CreateTaaPSO();
     CreateWaterPassRootSignature();
     CreateWaterPSO();
     CreateTerrainRootSignature();
@@ -176,7 +178,7 @@ void RenderingSystem::CreateDescriptorHeaps()
 {
     {
         D3D12_DESCRIPTOR_HEAP_DESC d = {};
-        d.NumDescriptors = RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1;
+        d.NumDescriptors = RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1 + 2;
         d.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         ThrowIfFailed(device_->CreateDescriptorHeap(&d, IID_PPV_ARGS(&rtvHeap_)));
         rtvDescSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -230,6 +232,7 @@ void RenderingSystem::CreateDepthStencilBuffer()
     gbuffer_.Create(device_.Get(), width_, height_, rtvDescSize_, gbufRtvStart,
         srvHeap_.Get(), SRV_GBUF_BASE, dsvHandle_);
     CreateSceneHDR();
+    CreateTaaHistory();
 }
 
 void RenderingSystem::CreateCommandObjects()
@@ -1085,6 +1088,129 @@ void RenderingSystem::CreateTonemapPSO()
     pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&tonemapPSO_)));
 }
+//taa
+static const char* kTaaShaderSrc = R"HLSL(
+Texture2D gCurrent : register(t0);
+Texture2D gHistory : register(t1);
+
+cbuffer TaaCB : register(b0)
+{
+    float  Alpha;
+    float  HistoryValid;
+    float2 Pad;
+};
+
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(uint vid : SV_VertexID)
+{
+    float2 t = float2((vid << 1) & 2, vid & 2);
+    VSOut o;
+    o.Pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+
+float4 PSMain(VSOut i) : SV_TARGET
+{
+    int2 p = int2(i.Pos.xy);
+    float3 cur = gCurrent.Load(int3(p, 0)).rgb;
+
+    if (HistoryValid < 0.5f)
+        return float4(cur, 1.0f);
+
+    float3 hist = gHistory.Load(int3(p, 0)).rgb;
+
+    return float4(lerp(hist, cur, Alpha), 1.0f);
+}
+)HLSL";
+
+void RenderingSystem::CreateTaaHistory()
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        taaHist_[i].Reset();
+
+        D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC d = {};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width = (UINT)width_; d.Height = (UINT)height_;
+        d.DepthOrArraySize = 1; d.MipLevels = 1;
+        d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; d.SampleDesc = { 1,0 };
+        d.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+        D3D12_CLEAR_VALUE cv = {};
+        cv.Format = d.Format;
+        cv.Color[3] = 1.0f;
+
+        ThrowIfFailed(device_->CreateCommittedResource(
+            &hp, D3D12_HEAP_FLAG_NONE, &d,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&taaHist_[i])));
+
+        D3D12_CPU_DESCRIPTOR_HANDLE h = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += (SIZE_T)(RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1 + i) * rtvDescSize_;
+        device_->CreateRenderTargetView(taaHist_[i].Get(), nullptr, h);
+        taaRtv_[i] = h;
+
+        CreateSRVInSlot(taaHist_[i].Get(), d.Format, SRV_TAA_HIST + i);
+    }
+    taaCur_ = 0;
+    taaHistoryValid_ = false;
+}
+
+void RenderingSystem::CreateTaaRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 1; ranges[0].BaseShaderRegister = 0;   // t0 = текущий кадр
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[1].NumDescriptors = 1; ranges[1].BaseShaderRegister = 1;   // t1 = история
+
+    D3D12_ROOT_PARAMETER params[3] = {};
+    for (int i = 0; i < 2; ++i)
+    {
+        params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[i].DescriptorTable.NumDescriptorRanges = 1;
+        params[i].DescriptorTable.pDescriptorRanges = &ranges[i];
+        params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[2].Constants.ShaderRegister = 0;
+    params[2].Constants.RegisterSpace = 0;
+    params[2].Constants.Num32BitValues = 4;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters = 3; desc.pParameters = params;
+
+    ComPtr<ID3DBlob> sig, err;
+    ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
+    ThrowIfFailed(device_->CreateRootSignature(0, sig->GetBufferPointer(),
+        sig->GetBufferSize(), IID_PPV_ARGS(&taaRootSig_)));
+}
+
+void RenderingSystem::CreateTaaPSO()
+{
+    auto vs = CompileShader(kTaaShaderSrc, "VSMain", "vs_5_0");
+    auto ps = CompileShader(kTaaShaderSrc, "PSMain", "ps_5_0");
+
+    D3D12_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D12_FILL_MODE_SOLID; raster.CullMode = D3D12_CULL_MODE_NONE;
+    D3D12_DEPTH_STENCIL_DESC dss = {};
+    D3D12_BLEND_DESC blend = {};
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = taaRootSig_.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.InputLayout = { nullptr, 0 };
+    pso.RasterizerState = raster; pso.DepthStencilState = dss; pso.BlendState = blend;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;   // как и история
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc = { 1,0 };
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&taaPSO_)));
+}
 
 void RenderingSystem::UpdateInstances(const std::vector<XMFLOAT4X4>& visible,
     const std::vector<XMFLOAT4X4>& all)
@@ -1113,10 +1239,10 @@ void RenderingSystem::BindInstancedPass()
 
     commandList_->SetGraphicsRootConstantBufferView(0,
         geometryCB2_->GetGPUVirtualAddress() + frameIndex_ * geometryCB2Stride_);
-    commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0));
+    commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0)); // albedo
     commandList_->SetGraphicsRootDescriptorTable(2, GpuHandle(SRV_COMMON_ALBEDO2));
-    commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2));
-    commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(mesh2SrvBase_ + 3));
+    commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2)); // normal
+    commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(mesh2SrvBase_ + 3)); // disp (не используется)
     commandList_->SetGraphicsRootShaderResourceView(5,
         instanceBuffer_->GetGPUVirtualAddress() + frameIndex_ * instanceStride_);
 }
@@ -1163,7 +1289,7 @@ void RenderingSystem::CreateShadowPassRootSignature()
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 4;              // t4, матрицы инстансов
+    params[1].Descriptor.ShaderRegister = 4;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};
@@ -1205,14 +1331,6 @@ void RenderingSystem::CreateShadowPSOs()
 
     D3D12_RASTERIZER_DESC raster = {};
     raster.FillMode = D3D12_FILL_MODE_SOLID;
-    // Отсечение граней ВЫКЛЮЧЕНО.
-    // Раньше здесь стояло CULL_FRONT — приём, при котором глубина берётся
-    // с задней стороны объекта, что убирает самозатенение. Но он требует
-    // ЗАМКНУТОЙ геометрии. Sponza — архитектурная модель, её полы, стены и
-    // значительная часть колонн односторонние: задней стороны у них нет,
-    // и при CULL_FRONT в карту глубины не писалось вообще ничего.
-    // Отсюда полное отсутствие теней.
-    // Без отсечения от самозатенения защищает только смещение глубины.
     raster.CullMode = D3D12_CULL_MODE_NONE;
     raster.DepthClipEnable = TRUE;
     raster.DepthBias = 3000;
@@ -1340,7 +1458,7 @@ void RenderingSystem::CreateLightingPassPSO()
     pso.InputLayout = { nullptr,0 }; pso.RasterizerState = raster; pso.DepthStencilState = dss;
     pso.BlendState = blend; pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;   // HDR
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&lightingPSO_)));
 }
@@ -1684,10 +1802,10 @@ void RenderingSystem::BindGeometryPassMesh2()
 {
     commandList_->SetGraphicsRootConstantBufferView(0,
         geometryCB2_->GetGPUVirtualAddress() + frameIndex_ * geometryCB2Stride_);
-    commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0)); // diffuse
-    commandList_->SetGraphicsRootDescriptorTable(2, GpuHandle(mesh2SrvBase_ + 1)); // albedo2
-    commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2)); // normal
-    commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(mesh2SrvBase_ + 3)); // disp
+    commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0));
+    commandList_->SetGraphicsRootDescriptorTable(2, GpuHandle(mesh2SrvBase_ + 1));
+    commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2));
+    commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(mesh2SrvBase_ + 3));
 }
 
 void RenderingSystem::DrawMesh2()
@@ -1697,7 +1815,6 @@ void RenderingSystem::DrawMesh2()
     commandList_->DrawIndexedInstanced(indexCount2_, 1, 0, 0, 0);
 }
 
-// Короткая обёртка: барьер "ресурс меняет состояние"
 static D3D12_RESOURCE_BARRIER MakeTransition(ID3D12Resource* res,
     D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to)
 {
@@ -1741,25 +1858,65 @@ void RenderingSystem::DrawLightingQuad() { commandList_->DrawInstanced(6, 1, 0, 
 //обновлено
 void RenderingSystem::EndFrame()
 {
-    D3D12_RESOURCE_BARRIER toRead[2] = {
-        MakeTransition(sceneHDR_.Get(),
-            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-        MakeTransition(renderTargets_[frameIndex_].Get(),
-            D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET)
-    };
-    commandList_->ResourceBarrier(2, toRead);
-
-    commandList_->OMSetRenderTargets(1, &rtvHandles_[frameIndex_], FALSE, nullptr);
     D3D12_VIEWPORT vp = { 0,0,(float)width_,(float)height_,0,1 };
     D3D12_RECT sr = { 0,0,width_,height_ };
+    ID3D12DescriptorHeap* heaps[] = { srvHeap_.Get() };
+
+    int tonemapSrc = SRV_SCENE_HDR;
+
+    if (taaEnabled_)
+    {
+        const int cur = taaCur_;       //сюда пишем :steamhappy:
+        const int prev = 1 - cur;      //отсюда читаем историю :steamsad:
+
+        D3D12_RESOURCE_BARRIER b1[2] = {
+            MakeTransition(sceneHDR_.Get(),
+                D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            MakeTransition(taaHist_[cur].Get(),
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET)
+        };
+        commandList_->ResourceBarrier(2, b1);
+
+        commandList_->OMSetRenderTargets(1, &taaRtv_[cur], FALSE, nullptr);
+        commandList_->RSSetViewports(1, &vp);
+        commandList_->RSSetScissorRects(1, &sr);
+        commandList_->SetGraphicsRootSignature(taaRootSig_.Get());
+        commandList_->SetPipelineState(taaPSO_.Get());
+        commandList_->SetDescriptorHeaps(1, heaps);
+        commandList_->SetGraphicsRootDescriptorTable(0, GpuHandle(SRV_SCENE_HDR));
+        commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(SRV_TAA_HIST + prev));
+        const float taaConsts[4] = { 0.1f, taaHistoryValid_ ? 1.0f : 0.0f, 0.0f, 0.0f };
+        commandList_->SetGraphicsRoot32BitConstants(2, 4, taaConsts, 0);
+        commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        commandList_->DrawInstanced(3, 1, 0, 0);
+
+        D3D12_RESOURCE_BARRIER b2 = MakeTransition(taaHist_[cur].Get(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        commandList_->ResourceBarrier(1, &b2);
+
+        tonemapSrc = SRV_TAA_HIST + cur;
+        taaHistoryValid_ = true;
+        taaCur_ = prev;
+    }
+    else
+    {
+        D3D12_RESOURCE_BARRIER b = MakeTransition(sceneHDR_.Get(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        commandList_->ResourceBarrier(1, &b);
+        taaHistoryValid_ = false;
+    }
+
+    D3D12_RESOURCE_BARRIER toBack = MakeTransition(renderTargets_[frameIndex_].Get(),
+        D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    commandList_->ResourceBarrier(1, &toBack);
+
+    commandList_->OMSetRenderTargets(1, &rtvHandles_[frameIndex_], FALSE, nullptr);
     commandList_->RSSetViewports(1, &vp);
     commandList_->RSSetScissorRects(1, &sr);
-
     commandList_->SetGraphicsRootSignature(postRootSig_.Get());
     commandList_->SetPipelineState(tonemapPSO_.Get());
-    ID3D12DescriptorHeap* heaps[] = { srvHeap_.Get() };
     commandList_->SetDescriptorHeaps(1, heaps);
-    commandList_->SetGraphicsRootDescriptorTable(0, GpuHandle(SRV_SCENE_HDR));
+    commandList_->SetGraphicsRootDescriptorTable(0, GpuHandle(tonemapSrc));
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->DrawInstanced(3, 1, 0, 0);
 
