@@ -1123,7 +1123,6 @@ float4 PSMain(VSOut i) : SV_TARGET
     int2 p = int2(i.Pos.xy);
     float3 cur = gCurrent.Load(int3(p, 0)).rgb;
 
-    // First frame (or after resize / TAA toggle): nothing to blend with
     if (HistoryValid < 0.5f)
         return float4(cur, 1.0f);
 
@@ -1153,7 +1152,23 @@ float4 PSMain(VSOut i) : SV_TARGET
     if (any(histUV < 0.0f) || any(histUV > 1.0f))
         return float4(cur, 1.0f);
 
-    float3 hist = gHistory.SampleLevel(gLinear, histUV, 0).rgb;
+        float3 hist = gHistory.SampleLevel(gLinear, histUV, 0).rgb;
+
+    float3 cMin = cur;
+    float3 cMax = cur;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            int2 sp = clamp(p + int2(x, y), int2(0, 0), int2(dim) - 1);
+            float3 s = gCurrent.Load(int3(sp, 0)).rgb;
+            cMin = min(cMin, s);
+            cMax = max(cMax, s);
+        }
+    }
+    hist = clamp(hist, cMin, cMax);
 
     return float4(lerp(hist, cur, Alpha), 1.0f);
 }
