@@ -40,6 +40,8 @@ void RenderingSystem::Initialize()
     CreateShadowPassRootSignature();
     CreateShadowPSOs();
     CreateLightingPassPSO();
+    CreatePostRootSignature();
+    CreateTonemapPSO();
     CreateWaterPassRootSignature();
     CreateWaterPSO();
     CreateTerrainRootSignature();
@@ -174,7 +176,7 @@ void RenderingSystem::CreateDescriptorHeaps()
 {
     {
         D3D12_DESCRIPTOR_HEAP_DESC d = {};
-        d.NumDescriptors = RS_FRAME_COUNT + GBUFFER_RT_COUNT;
+        d.NumDescriptors = RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1;
         d.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         ThrowIfFailed(device_->CreateDescriptorHeap(&d, IID_PPV_ARGS(&rtvHeap_)));
         rtvDescSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -227,6 +229,7 @@ void RenderingSystem::CreateDepthStencilBuffer()
     gbufRtvStart.ptr += (SIZE_T)RS_FRAME_COUNT * rtvDescSize_;
     gbuffer_.Create(device_.Get(), width_, height_, rtvDescSize_, gbufRtvStart,
         srvHeap_.Get(), SRV_GBUF_BASE, dsvHandle_);
+    CreateSceneHDR();
 }
 
 void RenderingSystem::CreateCommandObjects()
@@ -620,7 +623,7 @@ void RenderingSystem::CreateGeometryPassPSO()
     D3D12_DEPTH_STENCIL_DESC dss = {};
     dss.DepthEnable = TRUE; dss.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL; dss.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     D3D12_BLEND_DESC blend = {};
-    for (UINT i = 0;i < GBUFFER_RT_COUNT;++i) blend.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    for (UINT i = 0; i < GBUFFER_RT_COUNT; ++i) blend.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
     pso.pRootSignature = geometryRootSig_.Get();
@@ -890,7 +893,7 @@ float4 PSMain(FSQ i):SV_TARGET{
     if (pbr.g > 0.5f)
     {
         float3 e = alb * 3.2f;
-        return float4(e / (e + 1.0f), 1.0f);
+        return float4(e, 1.0f);
     }
     if(dot(nrm,nrm)<0.01f) return float4(0.02f,0.02f,0.05f,1);
     float3 N=normalize(nrm), wp=gWorldPos.Sample(gSampler,i.UV).rgb;
@@ -908,7 +911,6 @@ float4 PSMain(FSQ i):SV_TARGET{
         else if(l.Type==LIGHT_PT){ float3 tl=l.PositionWS.xyz-wp; float d=length(tl); if(d<l.Range) col+=BP(N,tl/d,V,alb,rgh,l.Color.rgb*l.Color.w)*Att(d,l.Range); }
         else if(l.Type==LIGHT_SPT){ float3 tl=l.PositionWS.xyz-wp; float d=length(tl); if(d<l.Range){ float3 L=tl/d; float ca=dot(-L,normalize(l.DirectionWS.xyz)); if(ca>l.SpotOuterCosine){ float sf=saturate((ca-l.SpotOuterCosine)/(l.SpotInnerCosine-l.SpotOuterCosine+0.0001f)); sf*=sf; col+=BP(N,L,V,alb,rgh,l.Color.rgb*l.Color.w)*Att(d,l.Range)*sf; } } }
     }
-    col=col/(col+1);
     // Debug mode 2: is anything written into the shadow map at all?
     // A cleared texel stays at exactly 1.0, so green means geometry was
     // rendered for this cascade and red means the map is empty.
@@ -979,7 +981,6 @@ void RenderingSystem::CreateInstancedPSO()
     pso.InputLayout = { layout,_countof(layout) };
     pso.RasterizerState = raster; pso.DepthStencilState = dss; pso.BlendState = blend;
     pso.SampleMask = UINT_MAX;
-    // Обычные треугольники, не патчи — тесселяции в этом проходе нет
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = GBUFFER_RT_COUNT;
     pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -990,8 +991,101 @@ void RenderingSystem::CreateInstancedPSO()
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&instancedPSO_)));
 }
 
-// Загрузить матрицы видимых объектов. Буфер — кольцо на RS_FRAME_COUNT
-// кадров по той же причине, что и константные: CPU опережает GPU.
+static const char* kTonemapShaderSrc = R"HLSL(
+Texture2D gScene : register(t0);
+
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(uint vid : SV_VertexID)
+{
+    float2 t = float2((vid << 1) & 2, vid & 2);
+    VSOut o;
+    o.Pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+
+float4 PSMain(VSOut i) : SV_TARGET
+{
+    float3 c = gScene.Load(int3((int2)i.Pos.xy, 0)).rgb;
+    c = c / (c + 1.0f);
+    return float4(c, 1.0f);
+}
+)HLSL";
+//не забудь
+void RenderingSystem::CreateSceneHDR()
+{
+    sceneHDR_.Reset();
+
+    D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC d = {};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = (UINT)width_; d.Height = (UINT)height_;
+    d.DepthOrArraySize = 1; d.MipLevels = 1;
+    d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; d.SampleDesc = { 1,0 };
+    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_CLEAR_VALUE cv = {};
+    cv.Format = d.Format;
+    cv.Color[3] = 1.0f;
+
+    ThrowIfFailed(device_->CreateCommittedResource(
+        &hp, D3D12_HEAP_FLAG_NONE, &d,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&sceneHDR_)));
+
+    D3D12_CPU_DESCRIPTOR_HANDLE h = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += (SIZE_T)(RS_FRAME_COUNT + GBUFFER_RT_COUNT) * rtvDescSize_;
+    device_->CreateRenderTargetView(sceneHDR_.Get(), nullptr, h);
+    sceneHdrRtv_ = h;
+
+    CreateSRVInSlot(sceneHDR_.Get(), d.Format, SRV_SCENE_HDR);
+}
+
+void RenderingSystem::CreatePostRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE range = {};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 1;
+    range.BaseShaderRegister = 0;
+
+    D3D12_ROOT_PARAMETER param = {};
+    param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    param.DescriptorTable.NumDescriptorRanges = 1;
+    param.DescriptorTable.pDescriptorRanges = &range;
+    param.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters = 1; desc.pParameters = &param;
+
+    ComPtr<ID3DBlob> sig, err;
+    ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
+    ThrowIfFailed(device_->CreateRootSignature(0, sig->GetBufferPointer(),
+        sig->GetBufferSize(), IID_PPV_ARGS(&postRootSig_)));
+}
+
+void RenderingSystem::CreateTonemapPSO()
+{
+    auto vs = CompileShader(kTonemapShaderSrc, "VSMain", "vs_5_0");
+    auto ps = CompileShader(kTonemapShaderSrc, "PSMain", "ps_5_0");
+
+    D3D12_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D12_FILL_MODE_SOLID; raster.CullMode = D3D12_CULL_MODE_NONE;
+    D3D12_DEPTH_STENCIL_DESC dss = {};
+    D3D12_BLEND_DESC blend = {};
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = postRootSig_.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.InputLayout = { nullptr, 0 };
+    pso.RasterizerState = raster; pso.DepthStencilState = dss; pso.BlendState = blend;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc = { 1,0 };
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&tonemapPSO_)));
+}
+
 void RenderingSystem::UpdateInstances(const std::vector<XMFLOAT4X4>& visible,
     const std::vector<XMFLOAT4X4>& all)
 {
@@ -1019,10 +1113,10 @@ void RenderingSystem::BindInstancedPass()
 
     commandList_->SetGraphicsRootConstantBufferView(0,
         geometryCB2_->GetGPUVirtualAddress() + frameIndex_ * geometryCB2Stride_);
-    commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0)); // albedo
+    commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0));
     commandList_->SetGraphicsRootDescriptorTable(2, GpuHandle(SRV_COMMON_ALBEDO2));
-    commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2)); // normal
-    commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(mesh2SrvBase_ + 3)); // disp (не используется)
+    commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2));
+    commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(mesh2SrvBase_ + 3));
     commandList_->SetGraphicsRootShaderResourceView(5,
         instanceBuffer_->GetGPUVirtualAddress() + frameIndex_ * instanceStride_);
 }
@@ -1035,7 +1129,6 @@ void RenderingSystem::DrawInstances(UINT instanceCount)
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &vbView2_);
     commandList_->IASetIndexBuffer(&ibView2_);
-    // Одна команда на все видимые объекты — в этом и смысл инстансинга
     commandList_->DrawIndexedInstanced(indexCount2_, instanceCount, 0, 0, 0);
 }
 
@@ -1247,7 +1340,7 @@ void RenderingSystem::CreateLightingPassPSO()
     pso.InputLayout = { nullptr,0 }; pso.RasterizerState = raster; pso.DepthStencilState = dss;
     pso.BlendState = blend; pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;   // HDR
     pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&lightingPSO_)));
 }
@@ -1333,7 +1426,7 @@ int RenderingSystem::UploadTextureToHeap(const TextureData& td)
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
     device_->GetCopyableFootprints(&td2, 0, 1, 0, &fp, nullptr, nullptr, nullptr);
     BYTE* mapped = nullptr; upRes->Map(0, nullptr, reinterpret_cast<void**>(&mapped));
-    for (UINT row = 0;row < td.height;++row)
+    for (UINT row = 0; row < td.height; ++row)
         memcpy(mapped + row * fp.Footprint.RowPitch, td.pixels.data() + row * td.width * 4, td.width * 4);
     upRes->Unmap(0, nullptr);
 
@@ -1452,7 +1545,7 @@ void RenderingSystem::MakeUploadBuffer(const void* data, UINT64 byteSize, ComPtr
 
 void RenderingSystem::CreateConstantBuffers()
 {
-    auto Align256 = [](UINT64 n) {return (n + 255) & ~UINT64(255);};
+    auto Align256 = [](UINT64 n) {return (n + 255) & ~UINT64(255); };
     D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
     auto make = [&](UINT64 sz, ComPtr<ID3D12Resource>& res) {
         D3D12_RESOURCE_DESC d = {};
@@ -1515,24 +1608,24 @@ void RenderingSystem::ClearLights() { lightingCB_.LightCount = 0; }
 void RenderingSystem::AddDirectionalLight(XMFLOAT3 dir, XMFLOAT3 col, float intens) {
     if (lightingCB_.LightCount >= MAX_LIGHTS)return;
     LightData& l = lightingCB_.Lights[lightingCB_.LightCount++];
-    l.PositionWS = { 0,0,0,0 };l.DirectionWS = { dir.x,dir.y,dir.z,0 };
-    l.Color = { col.x,col.y,col.z,intens };l.Range = l.SpotInnerCosine = l.SpotOuterCosine = 0;
+    l.PositionWS = { 0,0,0,0 }; l.DirectionWS = { dir.x,dir.y,dir.z,0 };
+    l.Color = { col.x,col.y,col.z,intens }; l.Range = l.SpotInnerCosine = l.SpotOuterCosine = 0;
     l.Type = (UINT)LightType::Directional;
 }
 void RenderingSystem::AddPointLight(XMFLOAT3 pos, XMFLOAT3 col, float intens, float range) {
     if (lightingCB_.LightCount >= MAX_LIGHTS)return;
     LightData& l = lightingCB_.Lights[lightingCB_.LightCount++];
-    l.PositionWS = { pos.x,pos.y,pos.z,1 };l.DirectionWS = { 0,0,0,0 };
-    l.Color = { col.x,col.y,col.z,intens };l.Range = range;l.SpotInnerCosine = l.SpotOuterCosine = 0;
+    l.PositionWS = { pos.x,pos.y,pos.z,1 }; l.DirectionWS = { 0,0,0,0 };
+    l.Color = { col.x,col.y,col.z,intens }; l.Range = range; l.SpotInnerCosine = l.SpotOuterCosine = 0;
     l.Type = (UINT)LightType::Point;
 }
 void RenderingSystem::AddSpotLight(XMFLOAT3 pos, XMFLOAT3 dir, XMFLOAT3 col, float intens, float range, float iDeg, float oDeg) {
     if (lightingCB_.LightCount >= MAX_LIGHTS)return;
     const float D2R = 3.14159265f / 180.f;
     LightData& l = lightingCB_.Lights[lightingCB_.LightCount++];
-    l.PositionWS = { pos.x,pos.y,pos.z,1 };l.DirectionWS = { dir.x,dir.y,dir.z,0 };
-    l.Color = { col.x,col.y,col.z,intens };l.Range = range;
-    l.SpotInnerCosine = cosf(iDeg * D2R);l.SpotOuterCosine = cosf(oDeg * D2R);
+    l.PositionWS = { pos.x,pos.y,pos.z,1 }; l.DirectionWS = { dir.x,dir.y,dir.z,0 };
+    l.Color = { col.x,col.y,col.z,intens }; l.Range = range;
+    l.SpotInnerCosine = cosf(iDeg * D2R); l.SpotOuterCosine = cosf(oDeg * D2R);
     l.Type = (UINT)LightType::Spot;
 }
 
@@ -1604,19 +1697,30 @@ void RenderingSystem::DrawMesh2()
     commandList_->DrawIndexedInstanced(indexCount2_, 1, 0, 0, 0);
 }
 
+// Короткая обёртка: барьер "ресурс меняет состояние"
+static D3D12_RESOURCE_BARRIER MakeTransition(ID3D12Resource* res,
+    D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to)
+{
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = res;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = from;
+    b.Transition.StateAfter = to;
+    return b;
+}
+
 void RenderingSystem::BeginLightingPass()
 {
     gbuffer_.TransitionTo(commandList_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    D3D12_RESOURCE_BARRIER b = {};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = renderTargets_[frameIndex_].Get();
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    b.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+    D3D12_RESOURCE_BARRIER b = MakeTransition(sceneHDR_.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     commandList_->ResourceBarrier(1, &b);
     const float cc[] = { 0,0,0,1 };
-    commandList_->ClearRenderTargetView(rtvHandles_[frameIndex_], cc, 0, nullptr);
-    commandList_->OMSetRenderTargets(1, &rtvHandles_[frameIndex_], FALSE, nullptr);
+    commandList_->ClearRenderTargetView(sceneHdrRtv_, cc, 0, nullptr);
+    commandList_->OMSetRenderTargets(1, &sceneHdrRtv_, FALSE, nullptr);
+
     if (lightingCBMapped_)
         memcpy(lightingCBMapped_ + frameIndex_ * lightingCBStride_, &lightingCB_, sizeof(lightingCB_));
     commandList_->SetGraphicsRootSignature(lightingRootSig_.Get());
@@ -1634,16 +1738,35 @@ void RenderingSystem::BeginLightingPass()
 }
 
 void RenderingSystem::DrawLightingQuad() { commandList_->DrawInstanced(6, 1, 0, 0); }
-
+//обновлено
 void RenderingSystem::EndFrame()
 {
-    D3D12_RESOURCE_BARRIER b = {};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = renderTargets_[frameIndex_].Get();
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    b.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    D3D12_RESOURCE_BARRIER toRead[2] = {
+        MakeTransition(sceneHDR_.Get(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        MakeTransition(renderTargets_[frameIndex_].Get(),
+            D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET)
+    };
+    commandList_->ResourceBarrier(2, toRead);
+
+    commandList_->OMSetRenderTargets(1, &rtvHandles_[frameIndex_], FALSE, nullptr);
+    D3D12_VIEWPORT vp = { 0,0,(float)width_,(float)height_,0,1 };
+    D3D12_RECT sr = { 0,0,width_,height_ };
+    commandList_->RSSetViewports(1, &vp);
+    commandList_->RSSetScissorRects(1, &sr);
+
+    commandList_->SetGraphicsRootSignature(postRootSig_.Get());
+    commandList_->SetPipelineState(tonemapPSO_.Get());
+    ID3D12DescriptorHeap* heaps[] = { srvHeap_.Get() };
+    commandList_->SetDescriptorHeaps(1, heaps);
+    commandList_->SetGraphicsRootDescriptorTable(0, GpuHandle(SRV_SCENE_HDR));
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList_->DrawInstanced(3, 1, 0, 0);
+
+    D3D12_RESOURCE_BARRIER b = MakeTransition(renderTargets_[frameIndex_].Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     commandList_->ResourceBarrier(1, &b);
+
     ThrowIfFailed(commandList_->Close());
     ID3D12CommandList* lists[] = { commandList_.Get() };
     commandQueue_->ExecuteCommandLists(1, lists);

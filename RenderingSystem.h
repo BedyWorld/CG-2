@@ -155,6 +155,9 @@ private:
     void CreateFence();
     void CreateGeometryPassRootSignature();
     void CreateLightingPassRootSignature();
+    void CreateSceneHDR();
+    void CreatePostRootSignature();
+    void CreateTonemapPSO();
     void CreateGeometryPassPSO();
     void CreateInstancedPSO();
     void CreateShadowPassRootSignature();
@@ -272,6 +275,13 @@ private:
         (UINT64)RS_MAX_INSTANCES * 64;   // sizeof(XMFLOAT4X4)
     ComPtr<ID3D12RootSignature>       lightingRootSig_;
     ComPtr<ID3D12PipelineState>       lightingPSO_;
+    //тонмап
+    static const int SRV_SCENE_HDR = SRV_HEAP_SIZE - 1;
+    ComPtr<ID3D12Resource>            sceneHDR_;
+    D3D12_CPU_DESCRIPTOR_HANDLE       sceneHdrRtv_ = {};
+    ComPtr<ID3D12RootSignature>       postRootSig_;
+    ComPtr<ID3D12PipelineState>       tonemapPSO_;
+
 
     // ---- Mesh1 ----
     ComPtr<ID3D12Resource>            vertexBuffer_;
