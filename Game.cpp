@@ -874,7 +874,7 @@ void Game::Update(float deltaTime)
         taaJitter_ = XMFLOAT2(0.f, 0.f);
     }
     ++taaFrame_;
-    
+    rs_->SetTaaMatrices(viewProjNoJitter_, prevViewProjNoJitter_);
     
     {
         XMFLOAT4X4 vp;

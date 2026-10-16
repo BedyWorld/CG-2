@@ -1090,11 +1090,18 @@ void RenderingSystem::CreateTonemapPSO()
 }
 //taa
 static const char* kTaaShaderSrc = R"HLSL(
-Texture2D gCurrent : register(t0);
-Texture2D gHistory : register(t1);
+Texture2D gCurrent  : register(t0);
+Texture2D gHistory  : register(t1);
+Texture2D gAlbedo   : register(t2);
+Texture2D gNormal   : register(t3);
+Texture2D gPBR      : register(t4);
+Texture2D gWorldPos : register(t5);
+SamplerState gLinear : register(s0);
 
 cbuffer TaaCB : register(b0)
 {
+    row_major float4x4 CurrVP;
+    row_major float4x4 PrevVP;
     float  Alpha;
     float  HistoryValid;
     float2 Pad;
@@ -1115,10 +1122,34 @@ float4 PSMain(VSOut i) : SV_TARGET
     int2 p = int2(i.Pos.xy);
     float3 cur = gCurrent.Load(int3(p, 0)).rgb;
 
+    // First frame (or after resize / TAA toggle): nothing to blend with
     if (HistoryValid < 0.5f)
         return float4(cur, 1.0f);
 
-    float3 hist = gHistory.Load(int3(p, 0)).rgb;
+    float2 dim;
+    gCurrent.GetDimensions(dim.x, dim.y);
+    float2 uv = (float2(p) + 0.5f) / dim;
+
+    float2 velocity = float2(0.0f, 0.0f);
+    float3 nrm = gNormal.Load(int3(p, 0)).rgb;
+    if (dot(nrm, nrm) > 0.01f)
+    {
+        float3 wp = gWorldPos.Load(int3(p, 0)).xyz;
+        float4 c = mul(float4(wp, 1.0f), CurrVP);
+        float4 q = mul(float4(wp, 1.0f), PrevVP);
+        if (c.w > 0.0001f && q.w > 0.0001f)
+        {
+            float2 cNdc = c.xy / c.w;
+            float2 qNdc = q.xy / q.w;
+            velocity = (cNdc - qNdc) * float2(0.5f, -0.5f);
+        }
+    }
+
+    float2 histUV = uv - velocity;
+    if (any(histUV < 0.0f) || any(histUV > 1.0f))
+        return float4(cur, 1.0f);
+
+    float3 hist = gHistory.SampleLevel(gLinear, histUV, 0).rgb;
 
     return float4(lerp(hist, cur, Alpha), 1.0f);
 }
@@ -1159,28 +1190,38 @@ void RenderingSystem::CreateTaaHistory()
 
 void RenderingSystem::CreateTaaRootSignature()
 {
-    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    D3D12_DESCRIPTOR_RANGE ranges[3] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[0].NumDescriptors = 1; ranges[0].BaseShaderRegister = 0;   // t0 = текущий кадр
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[1].NumDescriptors = 1; ranges[1].BaseShaderRegister = 1;   // t1 = история
+    ranges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[2].NumDescriptors = 4; ranges[2].BaseShaderRegister = 2;   // t2..t5 = G-buffer
 
-    D3D12_ROOT_PARAMETER params[3] = {};
-    for (int i = 0; i < 2; ++i)
+    D3D12_ROOT_PARAMETER params[4] = {};
+    for (int i = 0; i < 3; ++i)
     {
         params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         params[i].DescriptorTable.NumDescriptorRanges = 1;
         params[i].DescriptorTable.pDescriptorRanges = &ranges[i];
         params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     }
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[2].Constants.ShaderRegister = 0;
-    params[2].Constants.RegisterSpace = 0;
-    params[2].Constants.Num32BitValues = 4;
-    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[3].Constants.ShaderRegister = 0;
+    params[3].Constants.RegisterSpace = 0;
+    params[3].Constants.Num32BitValues = 36;
+    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC samp = {};
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.MaxLOD = D3D12_FLOAT32_MAX;
+    samp.ShaderRegister = 0;
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};
-    desc.NumParameters = 3; desc.pParameters = params;
+    desc.NumParameters = 4; desc.pParameters = params;
+    desc.NumStaticSamplers = 1; desc.pStaticSamplers = &samp;
 
     ComPtr<ID3DBlob> sig, err;
     ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
@@ -1885,8 +1926,13 @@ void RenderingSystem::EndFrame()
         commandList_->SetDescriptorHeaps(1, heaps);
         commandList_->SetGraphicsRootDescriptorTable(0, GpuHandle(SRV_SCENE_HDR));
         commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(SRV_TAA_HIST + prev));
-        const float taaConsts[4] = { 0.1f, taaHistoryValid_ ? 1.0f : 0.0f, 0.0f, 0.0f };
-        commandList_->SetGraphicsRoot32BitConstants(2, 4, taaConsts, 0);
+        commandList_->SetGraphicsRootDescriptorTable(2, gbuffer_.GetSRVGpuStart());   // G-buffer: t2..t5
+        float taaConsts[36] = {};
+        memcpy(taaConsts, &taaCurrVP_, sizeof(XMFLOAT4X4));
+        memcpy(taaConsts + 16, &taaPrevVP_, sizeof(XMFLOAT4X4));
+        taaConsts[32] = 0.1f;
+        taaConsts[33] = taaHistoryValid_ ? 1.0f : 0.0f;
+        commandList_->SetGraphicsRoot32BitConstants(3, 36, taaConsts, 0);
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         commandList_->DrawInstanced(3, 1, 0, 0);
 

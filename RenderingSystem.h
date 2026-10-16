@@ -118,7 +118,10 @@ public:
     void SetWireframe(bool on) { wireframe_ = on; }
     bool IsWireframe() const { return wireframe_; }
 
-    void SetTaaEnabled(bool on) { taaEnabled_ = on; }
+    void SetTaaMatrices(const XMFLOAT4X4& curr, const XMFLOAT4X4& prev)
+    {
+        taaCurrVP_ = curr; taaPrevVP_ = prev;
+    }
 
     void BindGeometryPass();        // биндит PSO, CB1, общие текстуры
     // visible == nullptr -> рисуем все субмеши (culling выключен).
@@ -295,7 +298,8 @@ private:
     int                               taaCur_ = 0;
     bool                              taaHistoryValid_ = false;
     bool                              taaEnabled_ = true;
-
+    XMFLOAT4X4                        taaCurrVP_ = {};
+    XMFLOAT4X4                        taaPrevVP_ = {};
 
     // ---- Mesh1 ----
     ComPtr<ID3D12Resource>            vertexBuffer_;
