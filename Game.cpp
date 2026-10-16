@@ -139,6 +139,7 @@ void Game::OnKeyDown(int vkey)
     if (vkey == VK_OEM_PLUS || vkey == VK_ADD)       waterAmpScale_ = min(waterAmpScale_ + 0.1f, 3.0f);
     if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) waterAmpScale_ = max(waterAmpScale_ - 0.1f, 0.0f);
     if (vkey == 'T') { tessEnabled_ = !tessEnabled_; return; }
+    if (vkey == 'J') { taaEnabled_ = !taaEnabled_; return; }
     if (vkey == 'C') { shadowsEnabled_ = !shadowsEnabled_; return; }
     if (vkey == 'P') { particlesEnabled_ = !particlesEnabled_; return; }
     if (vkey == 'G') {
@@ -773,6 +774,8 @@ void Game::CullSceneObjects()
     rs_->UpdateInstances(instanceMatrices_, allInstanceMatrices_);
 }
 
+
+
 void Game::UpdateWindowTitle()
 {
     const wchar_t* mode = !frustumCullEnabled_ ? L"off"
@@ -781,7 +784,7 @@ void Game::UpdateWindowTitle()
     wchar_t buf[256];
     swprintf_s(buf,
         L"%.1f ms (%.0f fps) | obj %d/%d %s(I) | Sponza %d/%d shadow %d | cull %s(F/O) %.3fms "
-        L"| tess %s(T) | shadows %s(C) | particles %s(P) | wire %s(G)",
+        L"| tess %s(T) | shadows %s(C) | particles %s(P) | wire %s(G) | TAA %s(J)",
         frameMsAvg_, frameMsAvg_ > 0.01f ? 1000.0f / frameMsAvg_ : 0.0f,
         statVisible_, SCENE_OBJECT_COUNT, instancesEnabled_ ? L"on " : L"off",
         statSubVisible_, statSubTotal_, statShadowSubs_,
@@ -789,10 +792,23 @@ void Game::UpdateWindowTitle()
         tessEnabled_ ? L"on" : L"off",
         shadowsEnabled_ ? L"on" : L"off",
         particlesEnabled_ ? L"on" : L"off",
-        wireframe_ ? L"on" : L"off");
+        wireframe_ ? L"on" : L"off",
+        taaEnabled_ ? L"on" : L"off");
     SetWindowTextW(hwnd_, buf);
 }
-
+//баяночник 1 холтон
+static float Halton(int index, int base)
+{
+    float f = 1.0f;
+    float r = 0.0f;
+    while (index > 0)
+    {
+        f = f / (float)base;
+        r = r + f * (float)(index % base);
+        index = index / base;
+    }
+    return r;
+}
 void Game::Update(float deltaTime)
 {
     time_ += deltaTime;
@@ -838,7 +854,28 @@ void Game::Update(float deltaTime)
     XMFLOAT3 targetF = F3Add(camPos_, forward);
     XMMATRIX view = XMMatrixLookAtLH(eyeV, XMLoadFloat3(&targetF), XMLoadFloat3(&up));
     float aspect = (height_ > 0) ? float(width_) / float(height_) : 1.f;
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(75.f), aspect, 0.05f, 3000.f);
+    XMMATRIX projNoJitter = XMMatrixPerspectiveFovLH(XMConvertToRadians(75.f), aspect, 0.05f, 3000.f);
+
+
+    taaPrevJitter_ = taaJitter_;
+    prevViewProjNoJitter_ = viewProjNoJitter_;
+    XMStoreFloat4x4(&viewProjNoJitter_, view * projNoJitter);
+
+    XMMATRIX proj = projNoJitter;
+    if (taaEnabled_ && width_ > 0 && height_ > 0)
+    {
+        const int idx = (int)(taaFrame_ % 8) + 1;
+        taaJitter_.x = (2.0f * Halton(idx, 2) - 1.0f) / (float)width_;
+        taaJitter_.y = (2.0f * Halton(idx, 3) - 1.0f) / (float)height_;
+        proj.r[2] = XMVectorAdd(proj.r[2], XMVectorSet(taaJitter_.x * 20.f, taaJitter_.y * 20.f, 0.f, 0.f));
+    }
+    else
+    {
+        taaJitter_ = XMFLOAT2(0.f, 0.f);
+    }
+    ++taaFrame_;
+    
+    
     {
         XMFLOAT4X4 vp;
         XMStoreFloat4x4(&vp, view * proj);

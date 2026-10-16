@@ -159,6 +159,14 @@ private:
     XMMATRIX worldMatrix_ = {};
     XMMATRIX viewMatrix_ = {};   // сохраняются для построения фрустума
     XMMATRIX projMatrix_ = {};
+
+    bool taaEnabled_ = true;
+    UINT taaFrame_ = 0;
+    XMFLOAT2 taaJitter_ = { 0.f, 0.f };
+    XMFLOAT2 taaPrevJitter_ = { 0.f, 0.f };
+    XMFLOAT4X4 viewProjNoJitter_ = {};
+    XMFLOAT4X4 prevViewProjNoJitter_ = {};
+
     XMMATRIX worldMatrix2_ = {};
     XMFLOAT3 mesh2Pos_ = { 0.0f, 0.0f, 0.0f };   // стрелки двигают модель
     float    mesh2Rotation_ = 0.0f;
