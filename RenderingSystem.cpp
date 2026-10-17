@@ -300,7 +300,7 @@ void RenderingSystem::CreateGeometryPassRootSignature()
 
 void RenderingSystem::CreateLightingPassRootSignature()
 {
-    D3D12_ROOT_PARAMETER params[3] = {};
+    D3D12_ROOT_PARAMETER params[4] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -321,6 +321,12 @@ void RenderingSystem::CreateLightingPassRootSignature()
     params[2].DescriptorTable.pDescriptorRanges = &shadowRange;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[3].Constants.ShaderRegister = 1;
+    params[3].Constants.RegisterSpace = 0;
+    params[3].Constants.Num32BitValues = 4;
+    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
     samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
     samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -336,7 +342,7 @@ void RenderingSystem::CreateLightingPassRootSignature()
     samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};
-    desc.NumParameters = 3; desc.pParameters = params;
+    desc.NumParameters = 4; desc.pParameters = params;
     desc.NumStaticSamplers = 2; desc.pStaticSamplers = samplers;
 
     ComPtr<ID3DBlob> sig, err;
@@ -823,6 +829,7 @@ SamplerState gSampler:register(s0);
 // comparison RESULT, not the depth values, so a single tap already
 // yields a bilinearly smoothed transition.
 SamplerComparisonState gShadowSampler:register(s1);
+cbuffer CbrCB : register(b1) { float CbrBlock; float CbrParity; float2 CbrPad; };
 struct FSQ{ float4 Pos:SV_POSITION; float2 UV:TEXCOORD0; };
 FSQ VSMain(uint vid:SV_VertexID){
     FSQ o; float2 p,u;
@@ -885,6 +892,11 @@ float SampleShadowPCF(float3 wp, float viewDepth)
 }
 
 float4 PSMain(FSQ i):SV_TARGET{
+    if (CbrBlock > 0.5f)
+    {
+        int2 cp = int2(i.Pos.xy) / (int)CbrBlock;
+        if (((cp.x + cp.y + (int)CbrParity) & 1) != 0) discard;
+    }
     float3 alb=gAlbedo.Sample(gSampler,i.UV).rgb;
     float3 nrm=gNormal.Sample(gSampler,i.UV).rgb;
     float4 pbr=gPBR.Sample(gSampler,i.UV);
@@ -1105,7 +1117,7 @@ cbuffer TaaCB : register(b0)
     float  Alpha;
     float  HistoryValid;
     float  DebugMode;
-    float2 Pad;
+    float  Pad;
 };
 
 struct VSOut { float4 Pos : SV_POSITION; };
@@ -1200,11 +1212,13 @@ void RenderingSystem::CreateTaaHistory()
         h.ptr += (SIZE_T)(RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1 + i) * rtvDescSize_;
         device_->CreateRenderTargetView(taaHist_[i].Get(), nullptr, h);
         taaRtv_[i] = h;
+        taaHist_[i]->SetName(i == 0 ? L"TAA History 0" : L"TAA History 1");
 
         CreateSRVInSlot(taaHist_[i].Get(), d.Format, SRV_TAA_HIST + i);
     }
     taaCur_ = 0;
     taaHistoryValid_ = false;
+
 }
 
 void RenderingSystem::CreateTaaRootSignature()
@@ -1909,6 +1923,8 @@ void RenderingSystem::BeginLightingPass()
     commandList_->SetGraphicsRootDescriptorTable(1, gbuffer_.GetSRVGpuStart());
     if (shadows_.Ready())
         commandList_->SetGraphicsRootDescriptorTable(2, shadows_.SrvGpu());
+        const float cbrConsts[4] = { (float)cbrMode_, (float)(cbrFrame_ & 1u), 0.f, 0.f };
+    commandList_->SetGraphicsRoot32BitConstants(3, 4, cbrConsts, 0);
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 0, nullptr);
     commandList_->IASetIndexBuffer(nullptr);
@@ -1994,6 +2010,7 @@ void RenderingSystem::EndFrame()
     ID3D12CommandList* lists[] = { commandList_.Get() };
     commandQueue_->ExecuteCommandLists(1, lists);
     ThrowIfFailed(swapChain_->Present(1, 0));
+    ++cbrFrame_;
     MoveToNextFrame();
 }
 
@@ -2127,7 +2144,7 @@ void RenderingSystem::CreateTerrainRootSignature()
     D3D12_DESCRIPTOR_RANGE heightRange = {};
     heightRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     heightRange.NumDescriptors = 1;
-    heightRange.BaseShaderRegister = 0;      // t0
+    heightRange.BaseShaderRegister = 0;
     heightRange.RegisterSpace = 0;
     heightRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 

@@ -143,6 +143,7 @@ void Game::OnKeyDown(int vkey)
     if (vkey == 'T') { tessEnabled_ = !tessEnabled_; return; }
     if (vkey == 'J') { taaEnabled_ = !taaEnabled_; rs_->SetTaaEnabled(taaEnabled_); return; }
     if (vkey == 'K') { taaAlphaIdx_ = (taaAlphaIdx_ + 1) % 4; rs_->SetTaaAlpha(kTaaAlphas[taaAlphaIdx_]); return; }
+    if (vkey == 'N') { cbrMode_ = (cbrMode_ + 1) % 3; rs_->SetCbr(cbrMode_); return; }
     if (vkey == 'V') { rs_->ToggleTaaDebug(); return; }
     if (vkey == 'C') { shadowsEnabled_ = !shadowsEnabled_; return; }
     if (vkey == 'P') { particlesEnabled_ = !particlesEnabled_; return; }
@@ -785,10 +786,12 @@ void Game::UpdateWindowTitle()
     const wchar_t* mode = !frustumCullEnabled_ ? L"off"
         : (octreeCullEnabled_ ? L"octree" : L"brute");
 
-    wchar_t buf[256];
+    const wchar_t* cbrName = cbrMode_ == 0 ? L"off" : (cbrMode_ == 1 ? L"1px" : L"2px");
+
+    wchar_t buf[320];
     swprintf_s(buf,
         L"%.1f ms (%.0f fps) | obj %d/%d %s(I) | Sponza %d/%d shadow %d | cull %s(F/O) %.3fms "
-        L"| tess %s(T) | shadows %s(C) | particles %s(P) | wire %s(G) | TAA %s(J)",
+        L"| tess %s(T) | shadows %s(C) | particles %s(P) | wire %s(G) | TAA %s(J) a=%.2f(K) | CBR %s(N)",
         frameMsAvg_, frameMsAvg_ > 0.01f ? 1000.0f / frameMsAvg_ : 0.0f,
         statVisible_, SCENE_OBJECT_COUNT, instancesEnabled_ ? L"on " : L"off",
         statSubVisible_, statSubTotal_, statShadowSubs_,
@@ -798,7 +801,8 @@ void Game::UpdateWindowTitle()
         particlesEnabled_ ? L"on" : L"off",
         wireframe_ ? L"on" : L"off",
         taaEnabled_ ? L"on" : L"off",
-        kTaaAlphas[taaAlphaIdx_]);
+        kTaaAlphas[taaAlphaIdx_], 
+        cbrName);
     SetWindowTextW(hwnd_, buf);
 }
 //баяночник 1 холтон

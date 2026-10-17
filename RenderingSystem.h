@@ -124,6 +124,7 @@ public:
     }
     void SetTaaEnabled(bool on) { taaEnabled_ = on; }
     void SetTaaAlpha(float a) { taaAlpha_ = a; }
+    void SetCbr(int mode) { cbrMode_ = mode; }
     void ToggleTaaDebug() { taaDebug_ = !taaDebug_; }
     void BindGeometryPass();        // биндит PSO, CB1, общие текстуры
     // visible == nullptr -> рисуем все субмеши (culling выключен).
@@ -302,6 +303,8 @@ private:
     bool                              taaEnabled_ = true;
     bool                              taaDebug_ = false;
     float                             taaAlpha_ = 0.1f;
+    int                               cbrMode_ = 0;
+    UINT                              cbrFrame_ = 0;
     XMFLOAT4X4                        taaCurrVP_ = {};
     XMFLOAT4X4                        taaPrevVP_ = {};
 
