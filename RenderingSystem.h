@@ -169,6 +169,9 @@ private:
     void CreateTaaHistory();
     void CreateTaaRootSignature();
     void CreateTaaPSO();
+    void CreateVelocity();
+    void CreateVelocityRootSignature();
+    void CreateVelocityPSO();
     void CreateGeometryPassPSO();
     void CreateInstancedPSO();
     void CreateShadowPassRootSignature();
@@ -294,6 +297,11 @@ private:
     ComPtr<ID3D12PipelineState>       tonemapPSO_;
 
     static const int SRV_TAA_HIST = SRV_HEAP_SIZE - 3;
+    static const int SRV_VELOCITY = SRV_HEAP_SIZE - 4;
+    ComPtr<ID3D12Resource>            velocityTex_;
+    D3D12_CPU_DESCRIPTOR_HANDLE       velocityRtv_ = {};
+    ComPtr<ID3D12RootSignature>       velocityRootSig_;
+    ComPtr<ID3D12PipelineState>       velocityPSO_;
     ComPtr<ID3D12Resource>            taaHist_[2];
     D3D12_CPU_DESCRIPTOR_HANDLE       taaRtv_[2] = {};
     ComPtr<ID3D12RootSignature>       taaRootSig_;

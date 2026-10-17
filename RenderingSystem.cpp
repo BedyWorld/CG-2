@@ -44,6 +44,8 @@ void RenderingSystem::Initialize()
     CreateTonemapPSO();
     CreateTaaRootSignature();
     CreateTaaPSO();
+    CreateVelocityRootSignature();
+    CreateVelocityPSO();
     CreateWaterPassRootSignature();
     CreateWaterPSO();
     CreateTerrainRootSignature();
@@ -178,7 +180,7 @@ void RenderingSystem::CreateDescriptorHeaps()
 {
     {
         D3D12_DESCRIPTOR_HEAP_DESC d = {};
-        d.NumDescriptors = RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1 + 2;
+        d.NumDescriptors = RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1 + 2 + 1;
         d.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         ThrowIfFailed(device_->CreateDescriptorHeap(&d, IID_PPV_ARGS(&rtvHeap_)));
         rtvDescSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -233,6 +235,7 @@ void RenderingSystem::CreateDepthStencilBuffer()
         srvHeap_.Get(), SRV_GBUF_BASE, dsvHandle_);
     CreateSceneHDR();
     CreateTaaHistory();
+    CreateVelocity();
 }
 
 void RenderingSystem::CreateCommandObjects()
@@ -315,7 +318,7 @@ void RenderingSystem::CreateLightingPassRootSignature()
 
     D3D12_DESCRIPTOR_RANGE shadowRange = {};
     shadowRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; shadowRange.NumDescriptors = 1;
-    shadowRange.BaseShaderRegister = 4;                      // t4
+    shadowRange.BaseShaderRegister = 4;
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[2].DescriptorTable.NumDescriptorRanges = 1;
     params[2].DescriptorTable.pDescriptorRanges = &shadowRange;
@@ -1100,6 +1103,124 @@ void RenderingSystem::CreateTonemapPSO()
     pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&tonemapPSO_)));
 }
+static const char* kVelocityShaderSrc = R"HLSL(
+Texture2D gNormal   : register(t1);
+Texture2D gWorldPos : register(t3);
+
+cbuffer VelCB : register(b0)
+{
+    row_major float4x4 CurrVP;
+    row_major float4x4 PrevVP;
+};
+
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(uint vid : SV_VertexID)
+{
+    float2 t = float2((vid << 1) & 2, vid & 2);
+    VSOut o;
+    o.Pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+
+float2 PSMain(VSOut i) : SV_TARGET
+{
+    int2 p = int2(i.Pos.xy);
+    float3 nrm = gNormal.Load(int3(p, 0)).rgb;
+    if (dot(nrm, nrm) <= 0.01f)
+        return float2(0.0f, 0.0f);
+
+    float3 wp = gWorldPos.Load(int3(p, 0)).xyz;
+    float4 c = mul(float4(wp, 1.0f), CurrVP);
+    float4 q = mul(float4(wp, 1.0f), PrevVP);
+    if (c.w <= 0.0001f || q.w <= 0.0001f)
+        return float2(0.0f, 0.0f);
+
+    float2 cNdc = c.xy / c.w;
+    float2 qNdc = q.xy / q.w;
+    return (cNdc - qNdc) * float2(0.5f, -0.5f);
+}
+)HLSL";
+
+void RenderingSystem::CreateVelocity()
+{
+    velocityTex_.Reset();
+
+    D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC d = {};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = (UINT)width_; d.Height = (UINT)height_;
+    d.DepthOrArraySize = 1; d.MipLevels = 1;
+    d.Format = DXGI_FORMAT_R16G16_FLOAT; d.SampleDesc = { 1,0 };
+    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_CLEAR_VALUE cv = {};
+    cv.Format = d.Format;
+
+    ThrowIfFailed(device_->CreateCommittedResource(
+        &hp, D3D12_HEAP_FLAG_NONE, &d,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&velocityTex_)));
+    velocityTex_->SetName(L"Velocity (motion vectors)");
+
+    D3D12_CPU_DESCRIPTOR_HANDLE h = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += (SIZE_T)(RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1 + 2) * rtvDescSize_;
+    device_->CreateRenderTargetView(velocityTex_.Get(), nullptr, h);
+    velocityRtv_ = h;
+
+    CreateSRVInSlot(velocityTex_.Get(), d.Format, SRV_VELOCITY);
+}
+
+void RenderingSystem::CreateVelocityRootSignature()
+{
+    D3D12_DESCRIPTOR_RANGE range = {};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 4; range.BaseShaderRegister = 0;
+
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[0].DescriptorTable.NumDescriptorRanges = 1;
+    params[0].DescriptorTable.pDescriptorRanges = &range;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[1].Constants.ShaderRegister = 0;
+    params[1].Constants.RegisterSpace = 0;
+    params[1].Constants.Num32BitValues = 32;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters = 2; desc.pParameters = params;
+
+    ComPtr<ID3DBlob> sig, err;
+    ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
+    ThrowIfFailed(device_->CreateRootSignature(0, sig->GetBufferPointer(),
+        sig->GetBufferSize(), IID_PPV_ARGS(&velocityRootSig_)));
+}
+
+void RenderingSystem::CreateVelocityPSO()
+{
+    auto vs = CompileShader(kVelocityShaderSrc, "VSMain", "vs_5_0");
+    auto ps = CompileShader(kVelocityShaderSrc, "PSMain", "ps_5_0");
+
+    D3D12_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D12_FILL_MODE_SOLID; raster.CullMode = D3D12_CULL_MODE_NONE;
+    D3D12_DEPTH_STENCIL_DESC dss = {};
+    D3D12_BLEND_DESC blend = {};
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = velocityRootSig_.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.InputLayout = { nullptr, 0 };
+    pso.RasterizerState = raster; pso.DepthStencilState = dss; pso.BlendState = blend;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R16G16_FLOAT;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc = { 1,0 };
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&velocityPSO_)));
+}
+
 //taa
 static const char* kTaaShaderSrc = R"HLSL(
 Texture2D gCurrent  : register(t0);
@@ -1108,6 +1229,7 @@ Texture2D gAlbedo   : register(t2);
 Texture2D gNormal   : register(t3);
 Texture2D gPBR      : register(t4);
 Texture2D gWorldPos : register(t5);
+Texture2D gVelocity : register(t6);
 SamplerState gLinear : register(s0);
 
 cbuffer TaaCB : register(b0)
@@ -1142,20 +1264,7 @@ float4 PSMain(VSOut i) : SV_TARGET
     gCurrent.GetDimensions(dim.x, dim.y);
     float2 uv = (float2(p) + 0.5f) / dim;
 
-    float2 velocity = float2(0.0f, 0.0f);
-    float3 nrm = gNormal.Load(int3(p, 0)).rgb;
-    if (dot(nrm, nrm) > 0.01f)
-    {
-        float3 wp = gWorldPos.Load(int3(p, 0)).xyz;
-        float4 c = mul(float4(wp, 1.0f), CurrVP);
-        float4 q = mul(float4(wp, 1.0f), PrevVP);
-        if (c.w > 0.0001f && q.w > 0.0001f)
-        {
-            float2 cNdc = c.xy / c.w;
-            float2 qNdc = q.xy / q.w;
-            velocity = (cNdc - qNdc) * float2(0.5f, -0.5f);
-        }
-    }
+    float2 velocity = gVelocity.Load(int3(p, 0)).rg;
     if (DebugMode > 0.5f)
         return float4(abs(velocity) * 400.0f, 0.0f, 1.0f);    
 
@@ -1212,26 +1321,26 @@ void RenderingSystem::CreateTaaHistory()
         h.ptr += (SIZE_T)(RS_FRAME_COUNT + GBUFFER_RT_COUNT + 1 + i) * rtvDescSize_;
         device_->CreateRenderTargetView(taaHist_[i].Get(), nullptr, h);
         taaRtv_[i] = h;
-        taaHist_[i]->SetName(i == 0 ? L"TAA History 0" : L"TAA History 1");
 
         CreateSRVInSlot(taaHist_[i].Get(), d.Format, SRV_TAA_HIST + i);
     }
     taaCur_ = 0;
     taaHistoryValid_ = false;
-
 }
 
 void RenderingSystem::CreateTaaRootSignature()
 {
-    D3D12_DESCRIPTOR_RANGE ranges[3] = {};
+    D3D12_DESCRIPTOR_RANGE ranges[4] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 1; ranges[0].BaseShaderRegister = 0;   // t0 = текущий кадр
+    ranges[0].NumDescriptors = 1; ranges[0].BaseShaderRegister = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[1].NumDescriptors = 1; ranges[1].BaseShaderRegister = 1;   // t1 = история
+    ranges[1].NumDescriptors = 1; ranges[1].BaseShaderRegister = 1;
     ranges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[2].NumDescriptors = 4; ranges[2].BaseShaderRegister = 2;   // t2..t5 = G-buffer
+    ranges[2].NumDescriptors = 4; ranges[2].BaseShaderRegister = 2;
+    ranges[3].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[3].NumDescriptors = 1; ranges[3].BaseShaderRegister = 6;
 
-    D3D12_ROOT_PARAMETER params[4] = {};
+    D3D12_ROOT_PARAMETER params[5] = {};
     for (int i = 0; i < 3; ++i)
     {
         params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -1245,6 +1354,11 @@ void RenderingSystem::CreateTaaRootSignature()
     params[3].Constants.Num32BitValues = 36;
     params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[4].DescriptorTable.NumDescriptorRanges = 1;
+    params[4].DescriptorTable.pDescriptorRanges = &ranges[3];
+    params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     D3D12_STATIC_SAMPLER_DESC samp = {};
     samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -1253,7 +1367,7 @@ void RenderingSystem::CreateTaaRootSignature()
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};
-    desc.NumParameters = 4; desc.pParameters = params;
+    desc.NumParameters = 5; desc.pParameters = params;
     desc.NumStaticSamplers = 1; desc.pStaticSamplers = &samp;
 
     ComPtr<ID3DBlob> sig, err;
@@ -1281,7 +1395,7 @@ void RenderingSystem::CreateTaaPSO()
     pso.RasterizerState = raster; pso.DepthStencilState = dss; pso.BlendState = blend;
     pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;   // как и история
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&taaPSO_)));
 }
@@ -1923,7 +2037,7 @@ void RenderingSystem::BeginLightingPass()
     commandList_->SetGraphicsRootDescriptorTable(1, gbuffer_.GetSRVGpuStart());
     if (shadows_.Ready())
         commandList_->SetGraphicsRootDescriptorTable(2, shadows_.SrvGpu());
-        const float cbrConsts[4] = { (float)cbrMode_, (float)(cbrFrame_ & 1u), 0.f, 0.f };
+    const float cbrConsts[4] = { (float)cbrMode_, (float)(cbrFrame_ & 1u), 0.f, 0.f };
     commandList_->SetGraphicsRoot32BitConstants(3, 4, cbrConsts, 0);
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 0, nullptr);
@@ -1942,6 +2056,30 @@ void RenderingSystem::EndFrame()
 
     if (taaEnabled_)
     {
+        {
+            D3D12_RESOURCE_BARRIER vb = MakeTransition(velocityTex_.Get(),
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            commandList_->ResourceBarrier(1, &vb);
+
+            commandList_->OMSetRenderTargets(1, &velocityRtv_, FALSE, nullptr);
+            commandList_->RSSetViewports(1, &vp);
+            commandList_->RSSetScissorRects(1, &sr);
+            commandList_->SetGraphicsRootSignature(velocityRootSig_.Get());
+            commandList_->SetPipelineState(velocityPSO_.Get());
+            commandList_->SetDescriptorHeaps(1, heaps);
+            commandList_->SetGraphicsRootDescriptorTable(0, gbuffer_.GetSRVGpuStart());
+            float velConsts[32];
+            memcpy(velConsts, &taaCurrVP_, sizeof(XMFLOAT4X4));
+            memcpy(velConsts + 16, &taaPrevVP_, sizeof(XMFLOAT4X4));
+            commandList_->SetGraphicsRoot32BitConstants(1, 32, velConsts, 0);
+            commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            commandList_->DrawInstanced(3, 1, 0, 0);
+
+            vb = MakeTransition(velocityTex_.Get(),
+                D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            commandList_->ResourceBarrier(1, &vb);
+        }
+
         const int cur = taaCur_;       //сюда пишем :steamhappy:
         const int prev = 1 - cur;      //отсюда читаем историю :steamsad:
 
@@ -1962,12 +2100,13 @@ void RenderingSystem::EndFrame()
         commandList_->SetGraphicsRootDescriptorTable(0, GpuHandle(SRV_SCENE_HDR));
         commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(SRV_TAA_HIST + prev));
         commandList_->SetGraphicsRootDescriptorTable(2, gbuffer_.GetSRVGpuStart());   // G-buffer: t2..t5
+        commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(SRV_VELOCITY));      // velocity: t6
         float taaConsts[36] = {};
         memcpy(taaConsts, &taaCurrVP_, sizeof(XMFLOAT4X4));
         memcpy(taaConsts + 16, &taaPrevVP_, sizeof(XMFLOAT4X4));
         taaConsts[32] = taaAlpha_;
         taaConsts[33] = taaHistoryValid_ ? 1.0f : 0.0f;
-        taaConsts[34] = taaDebug_ ? 1.0f : 0.0f; 
+        taaConsts[34] = taaDebug_ ? 1.0f : 0.0f;
         commandList_->SetGraphicsRoot32BitConstants(3, 36, taaConsts, 0);
         commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         commandList_->DrawInstanced(3, 1, 0, 0);
@@ -2075,7 +2214,6 @@ Texture2D<float> gHeight : register(t0);
 struct VSInput { float3 Pos:POSITION; float3 Normal:NORMAL; float4 Color:COLOR; float2 TexCoord:TEXCOORD0; };
 struct VSOut   { float4 Pos:SV_POSITION; float3 PosWS:TEXCOORD0; float3 Normal:TEXCOORD1; float Level:TEXCOORD2; };
 
-// Высота 0..1 в клетке (x, z). Load вместо Sample: без фильтрации, точное значение.
 float HeightAt(int x, int z)
 {
     int last = (int)MapSize - 1;
@@ -2149,17 +2287,17 @@ void RenderingSystem::CreateTerrainRootSignature()
     heightRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     D3D12_ROOT_PARAMETER params[3] = {};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;            // b0
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; // b1
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[1].Constants.ShaderRegister = 1;
     params[1].Constants.RegisterSpace = 0;
     params[1].Constants.Num32BitValues = 4;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; // t0
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[2].DescriptorTable.NumDescriptorRanges = 1;
     params[2].DescriptorTable.pDescriptorRanges = &heightRange;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
