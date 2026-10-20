@@ -141,6 +141,7 @@ void Game::OnKeyDown(int vkey)
     if (vkey == VK_OEM_PLUS || vkey == VK_ADD)       waterAmpScale_ = min(waterAmpScale_ + 0.1f, 3.0f);
     if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) waterAmpScale_ = max(waterAmpScale_ - 0.1f, 0.0f);
     if (vkey == 'T') { tessEnabled_ = !tessEnabled_; return; }
+    if (vkey == 'X') { xrayEnabled_ = !xrayEnabled_; return; }
     if (vkey == 'J') { taaEnabled_ = !taaEnabled_; rs_->SetTaaEnabled(taaEnabled_); return; }
     if (vkey == 'K') { taaAlphaIdx_ = (taaAlphaIdx_ + 1) % 4; rs_->SetTaaAlpha(kTaaAlphas[taaAlphaIdx_]); return; }
     if (vkey == 'N') { cbrMode_ = (cbrMode_ + 1) % 3; rs_->SetCbr(cbrMode_); return; }
@@ -1139,6 +1140,8 @@ void Game::Render()
 
     rs_->BeginLightingPass();
     rs_->DrawLightingQuad();
+    if (xrayEnabled_ && instancesEnabled_ && rs_->HasMesh2() && !terrainOnly_)
+        rs_->DrawXRayInstances(static_cast<UINT>(visibleObjects_.size()));
     rs_->EndFrame();
 }
 

@@ -37,6 +37,7 @@ void RenderingSystem::Initialize()
     CreateLightingPassRootSignature();
     CreateGeometryPassPSO();
     CreateInstancedPSO();
+    CreateXRayPSO();
     CreateShadowPassRootSignature();
     CreateShadowPSOs();
     CreateLightingPassPSO();
@@ -114,10 +115,10 @@ void RenderingSystem::BeginResourceUpload()
             texUploads_.push_back(std::move(upRes));
         };
 
-    UploadReserved(CreateSolidColor(200, 200, 200), SRV_FALLBACK_ALBEDO); // slot 0
-    UploadReserved(CreateFlatNormal(), SRV_FALLBACK_NORMAL); // slot 1
-    UploadReserved(CreateSolidColor(128, 128, 128), SRV_FALLBACK_DISP);   // slot 2
-    UploadReserved(CreateSolidColor(200, 200, 200), SRV_COMMON_ALBEDO2);  // slot 3
+    UploadReserved(CreateSolidColor(200, 200, 200), SRV_FALLBACK_ALBEDO);
+    UploadReserved(CreateFlatNormal(), SRV_FALLBACK_NORMAL);
+    UploadReserved(CreateSolidColor(128, 128, 128), SRV_FALLBACK_DISP);
+    UploadReserved(CreateSolidColor(200, 200, 200), SRV_COMMON_ALBEDO2);
 }
 
 void RenderingSystem::EndResourceUpload()
@@ -219,13 +220,13 @@ void RenderingSystem::CreateDepthStencilBuffer()
     d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     d.Width = (UINT)width_; d.Height = (UINT)height_;
     d.DepthOrArraySize = 1; d.MipLevels = 1;
-    d.Format = DXGI_FORMAT_D32_FLOAT; d.SampleDesc = { 1,0 };
+    d.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; d.SampleDesc = { 1,0 };
     d.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
+    D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; cv.DepthStencil.Depth = 1.0f;
     ThrowIfFailed(device_->CreateCommittedResource(
         &hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&depthStencil_)));
     D3D12_DEPTH_STENCIL_VIEW_DESC dsvD = {};
-    dsvD.Format = DXGI_FORMAT_D32_FLOAT; dsvD.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    dsvD.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; dsvD.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     dsvHandle_ = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
     device_->CreateDepthStencilView(depthStencil_.Get(), &dsvD, dsvHandle_);
 
@@ -652,7 +653,7 @@ void RenderingSystem::CreateGeometryPassPSO()
     pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT; pso.SampleDesc = { 1,0 };
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&geometryPSO_)));
 
     // Каркасный вариант
@@ -722,7 +723,7 @@ void RenderingSystem::CreateWaterPSO()
     pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&waterPSO_)));
 }
@@ -807,6 +808,11 @@ PSOut PSMain(VSOut i)
     o.PBR      = float4(0.5f, 0.0f, 1.0f, 1.0f);
     o.WorldPos = float4(i.PosWS, 1.0f);
     return o;
+}
+
+float4 PSXRay(VSOut i) : SV_TARGET
+{
+    return float4(1.6f, 1.3f, 0.1f, 0.65f);
 }
 )HLSL";
 
@@ -989,6 +995,13 @@ void RenderingSystem::CreateInstancedPSO()
     raster.FillMode = D3D12_FILL_MODE_SOLID; raster.CullMode = D3D12_CULL_MODE_BACK; raster.DepthClipEnable = TRUE;
     D3D12_DEPTH_STENCIL_DESC dss = {};
     dss.DepthEnable = TRUE; dss.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL; dss.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    dss.StencilEnable = TRUE;
+    dss.StencilReadMask = 0xFF; dss.StencilWriteMask = 0xFF;
+    dss.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    dss.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+    dss.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+    dss.FrontFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
+    dss.BackFace = dss.FrontFace;
     D3D12_BLEND_DESC blend = {};
     for (UINT i = 0; i < GBUFFER_RT_COUNT; ++i) blend.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
@@ -1005,8 +1018,74 @@ void RenderingSystem::CreateInstancedPSO()
     pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT; pso.SampleDesc = { 1,0 };
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&instancedPSO_)));
+}
+
+void RenderingSystem::CreateXRayPSO()
+{
+    ComPtr<ID3DBlob> vs, ps, err;
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    auto Compile = [&](const char* entry, const char* target, ComPtr<ID3DBlob>& out)
+        {
+            HRESULT hr = D3DCompile(kInstancedShaderSrc, strlen(kInstancedShaderSrc),
+                nullptr, nullptr, nullptr, entry, target, flags, 0, &out, &err);
+            if (FAILED(hr))
+            {
+                if (err) OutputDebugStringA((char*)err->GetBufferPointer());
+                ThrowIfFailed(hr);
+            }
+        };
+    Compile("VSMain", "vs_5_0", vs);
+    Compile("PSXRay", "ps_5_0", ps);
+
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,   0, 0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"NORMAL",  0,DXGI_FORMAT_R32G32B32_FLOAT,   0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"COLOR",   0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,24,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,      0,40,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+    };
+
+    D3D12_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D12_FILL_MODE_SOLID; raster.CullMode = D3D12_CULL_MODE_BACK; raster.DepthClipEnable = TRUE;
+
+    D3D12_DEPTH_STENCIL_DESC dss = {};
+    dss.DepthEnable = TRUE;
+    dss.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    dss.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+    dss.StencilEnable = TRUE;
+    dss.StencilReadMask = 0xFF; dss.StencilWriteMask = 0xFF;
+    dss.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_NOT_EQUAL;
+    dss.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+    dss.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+    dss.FrontFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
+    dss.BackFace = dss.FrontFace;
+
+    D3D12_BLEND_DESC blend = {};
+    blend.RenderTarget[0].BlendEnable = TRUE;
+    blend.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    blend.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    blend.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = geometryRootSig_.Get();
+    pso.VS = { vs->GetBufferPointer(),vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(),ps->GetBufferSize() };
+    pso.InputLayout = { layout,_countof(layout) };
+    pso.RasterizerState = raster; pso.DepthStencilState = dss; pso.BlendState = blend;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; pso.SampleDesc = { 1,0 };
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&xrayPSO_)));
 }
 
 static const char* kTonemapShaderSrc = R"HLSL(
@@ -1427,12 +1506,13 @@ void RenderingSystem::BindInstancedPass()
 
     commandList_->SetGraphicsRootConstantBufferView(0,
         geometryCB2_->GetGPUVirtualAddress() + frameIndex_ * geometryCB2Stride_);
-    commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0)); // albedo
+    commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(mesh2SrvBase_ + 0));
     commandList_->SetGraphicsRootDescriptorTable(2, GpuHandle(SRV_COMMON_ALBEDO2));
-    commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2)); // normal
-    commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(mesh2SrvBase_ + 3)); // disp (не используется)
+    commandList_->SetGraphicsRootDescriptorTable(3, GpuHandle(mesh2SrvBase_ + 2));
+    commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(mesh2SrvBase_ + 3));
     commandList_->SetGraphicsRootShaderResourceView(5,
         instanceBuffer_->GetGPUVirtualAddress() + frameIndex_ * instanceStride_);
+    commandList_->OMSetStencilRef(1);
 }
 
 void RenderingSystem::DrawInstances(UINT instanceCount)
@@ -1444,6 +1524,18 @@ void RenderingSystem::DrawInstances(UINT instanceCount)
     commandList_->IASetVertexBuffers(0, 1, &vbView2_);
     commandList_->IASetIndexBuffer(&ibView2_);
     commandList_->DrawIndexedInstanced(indexCount2_, instanceCount, 0, 0, 0);
+}
+
+void RenderingSystem::DrawXRayInstances(UINT instanceCount)
+{
+    if (!xrayPSO_ || instanceCount == 0 || indexCount2_ == 0) return;
+
+    commandList_->OMSetRenderTargets(1, &sceneHdrRtv_, FALSE, &dsvHandle_);
+
+    BindInstancedPass();
+    commandList_->SetPipelineState(xrayPSO_.Get());
+    commandList_->OMSetStencilRef(1);
+    DrawInstances(instanceCount);
 }
 
 static const char* kShadowShaderSrc = R"HLSL(
@@ -1941,7 +2033,7 @@ ID3D12GraphicsCommandList* RenderingSystem::BeginFrame()
     ThrowIfFailed(commandList_->Reset(commandAllocators_[frameIndex_].Get(), nullptr));
     gbuffer_.TransitionTo(commandList_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
     gbuffer_.Clear(commandList_.Get());
-    commandList_->ClearDepthStencilView(dsvHandle_, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    commandList_->ClearDepthStencilView(dsvHandle_, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
     commandList_->OMSetRenderTargets(GBUFFER_RT_COUNT, gbuffer_.GetRTVHandles(), FALSE, &dsvHandle_);
     D3D12_VIEWPORT vp = { 0,0,(float)width_,(float)height_,0,1 };
     D3D12_RECT sr = { 0,0,width_,height_ };
@@ -2099,8 +2191,8 @@ void RenderingSystem::EndFrame()
         commandList_->SetDescriptorHeaps(1, heaps);
         commandList_->SetGraphicsRootDescriptorTable(0, GpuHandle(SRV_SCENE_HDR));
         commandList_->SetGraphicsRootDescriptorTable(1, GpuHandle(SRV_TAA_HIST + prev));
-        commandList_->SetGraphicsRootDescriptorTable(2, gbuffer_.GetSRVGpuStart());   // G-buffer: t2..t5
-        commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(SRV_VELOCITY));      // velocity: t6
+        commandList_->SetGraphicsRootDescriptorTable(2, gbuffer_.GetSRVGpuStart());
+        commandList_->SetGraphicsRootDescriptorTable(4, GpuHandle(SRV_VELOCITY));
         float taaConsts[36] = {};
         memcpy(taaConsts, &taaCurrVP_, sizeof(XMFLOAT4X4));
         memcpy(taaConsts + 16, &taaPrevVP_, sizeof(XMFLOAT4X4));
@@ -2230,7 +2322,6 @@ VSOut VSMain(VSInput i)
 
     float h = HeightAt(ix, iz);
 
-    // нормаль по соседним клеткам; у крупных узлов шаг больше
     int step = max(1, (int)(NodeSize / 32.0f + 0.5f));
     float hL = HeightAt(ix - step, iz);
     float hR = HeightAt(ix + step, iz);
@@ -2352,7 +2443,7 @@ void RenderingSystem::CreateTerrainPSO()
     pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&terrainPSO_)));
 
@@ -2363,7 +2454,7 @@ void RenderingSystem::CreateTerrainPSO()
 
 void RenderingSystem::BuildTerrainGrid()
 {
-    const int N = 32;   // 32x32 cells = 33x33 vertices
+    const int N = 32;
 
     std::vector<Vertex> verts;
     std::vector<UINT>   idxs;

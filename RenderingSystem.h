@@ -100,6 +100,7 @@ public:
         const std::vector<XMFLOAT4X4>& all);
     void BindInstancedPass();
     void DrawInstances(UINT instanceCount);
+    void DrawXRayInstances(UINT instanceCount);
 
     //каскадные карты теней
     CascadedShadowMap& Shadows() { return shadows_; }
@@ -174,6 +175,7 @@ private:
     void CreateVelocityPSO();
     void CreateGeometryPassPSO();
     void CreateInstancedPSO();
+    void CreateXRayPSO();
     void CreateShadowPassRootSignature();
     void CreateShadowPSOs();
     void CreateLightingPassPSO();
@@ -265,6 +267,7 @@ private:
     // Отдельный PSO без тесселяции: гонять несколько тысяч объектов
     // через HS/DS бессмысленно дорого, а рельеф на них не нужен.
     ComPtr<ID3D12PipelineState>       instancedPSO_;
+    ComPtr<ID3D12PipelineState>       xrayPSO_;
 
     CascadedShadowMap                 shadows_;
     ParticleSystem                    particles_;

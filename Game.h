@@ -79,6 +79,7 @@ public:
     bool  octreeCullEnabled_ = true;   // клавиша O
     bool  tessEnabled_ = true;   // клавиша T
     bool  instancesEnabled_ = false;  // клавиша I, по умолчанию выключены
+    bool  xrayEnabled_ = true;
     bool  shadowsEnabled_ = true;   // клавиша C — каскадные тени
     bool  particlesEnabled_ = true;   // клавиша P
     ParticleCB particleCB_ = {};
