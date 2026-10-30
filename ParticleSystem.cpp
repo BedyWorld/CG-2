@@ -600,14 +600,11 @@ void ParticleSystem::CreateRenderPipeline(ID3D12Device* device)
     pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.RTVFormats[3] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     pso.SampleDesc = { 1,0 };
     ThrowIfFailed(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&renderPSO_)));
 }
 
-// ============================================================
-//  Кадр симуляции. Всё считается на GPU.
-// ============================================================
 void ParticleSystem::Simulate(ID3D12GraphicsCommandList* cl,
     ID3D12DescriptorHeap* srvHeap, const ParticleCB& cbIn)
 {

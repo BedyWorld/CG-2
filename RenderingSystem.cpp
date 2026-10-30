@@ -856,6 +856,43 @@ float3 BP(float3 N,float3 L,float3 V,float3 alb,float rgh,float3 lc){
     float sh=max(2/(rgh*rgh+0.001f)-2,1); float sp=pow(max(dot(N,H),0),sh);
     return alb*d*lc+sp*lc*(1-rgh);
 }
+float3 VolumetricSpots(float3 camPos, float3 wp, float2 px)
+{
+    float strength = LCBPad.x;
+    if (strength <= 0.0f) return float3(0,0,0);
+    float g = LCBPad.y;
+    float3 toP = wp - camPos;
+    float rayLen = length(toP);
+    float3 rd = toP / max(rayLen, 1e-4f);
+    const int STEPS = 24;
+    float stepLen = min(rayLen, 60.0f) / STEPS;
+    float ign = frac(52.9829189f * frac(dot(px, float2(0.06711056f, 0.00583715f))));
+    float jit = frac(ign + 0.5f * CbrParity);
+    float g2 = g * g;
+    float3 acc = float3(0,0,0);
+    [loop] for (int s = 0; s < STEPS; ++s)
+    {
+        float3 p = camPos + rd * ((s + jit) * stepLen);
+        [loop] for (int k = 0; k < LightCount; ++k)
+        {
+            LightData l = Lights[k];
+            if (l.Type != LIGHT_SPT) continue;
+            float3 tl = l.PositionWS.xyz - p;
+            float d = length(tl);
+            if (d >= l.Range) continue;
+            float3 ld = normalize(l.DirectionWS.xyz);
+            float ca = dot(-tl / d, ld);
+            if (ca <= l.SpotOuterCosine) continue;
+            float sf = saturate((ca - l.SpotOuterCosine) / (l.SpotInnerCosine - l.SpotOuterCosine + 0.0001f));
+            sf *= sf;
+            float cosT = dot(ld, -rd);
+            float phase = (1.0f - g2) / (12.5663706f * pow(max(1.0f + g2 - 2.0f * g * cosT, 1e-4f), 1.5f));
+            float fall = saturate(1.0f - d / l.Range);
+            acc += l.Color.rgb * l.Color.w * sf * fall * fall * phase;
+        }
+    }
+    return acc * stepLen * strength;
+}
 float SampleShadowPCF(float3 wp, float viewDepth)
 {
     if (ShadowLightIndex < 0) return 1.0f;
@@ -1018,6 +1055,7 @@ float4 PSMain(FSQ i):SV_TARGET{
                               : float3(1,1,0.4f);
         if (viewDepth <= CascadeSplits.w) col = lerp(col, col*tint, 0.55f);
     }
+    col += VolumetricSpots(CameraPos.xyz, wp, i.Pos.xy);
     if (AtmoCamForward.w > 0.5f) col = AtmoApply(col, wp);
     return float4(col,1);
 }
@@ -1811,6 +1849,11 @@ D3D12_GPU_DESCRIPTOR_HANDLE RenderingSystem::GpuHandle(int slot) const
 
 void RenderingSystem::CreateSRVInSlot(ID3D12Resource* res, DXGI_FORMAT fmt, int slot)
 {
+    if (slot >= 0)
+    {
+        if (static_cast<size_t>(slot) >= slotRes_.size()) slotRes_.resize(static_cast<size_t>(slot) + 1, nullptr);
+        slotRes_[slot] = res;
+    }
     D3D12_CPU_DESCRIPTOR_HANDLE h = srvHeap_->GetCPUDescriptorHandleForHeapStart();
     h.ptr += (SIZE_T)slot * srvDescSize_;
     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
@@ -1823,6 +1866,7 @@ void RenderingSystem::CreateSRVInSlot(ID3D12Resource* res, DXGI_FORMAT fmt, int 
 int RenderingSystem::LoadAndCacheDisplacement(const std::wstring& dispPath,
     const std::wstring& normalPath)
 {
+    if (dispPath == L"-") return SRV_FALLBACK_DISP;
     const std::wstring key = !dispPath.empty() ? dispPath
         : (normalPath.empty() ? std::wstring() : L"@height:" + normalPath);
     if (key.empty()) return SRV_FALLBACK_DISP;
@@ -1947,6 +1991,17 @@ void RenderingSystem::BuildMesh1(
     }
 }
 
+void RenderingSystem::UpdateMesh1Vertices(UINT firstVertex, const Vertex* data, UINT count)
+{
+    if (!vertexBuffer_ || !data || count == 0) return;
+    WaitForGPU();
+    BYTE* m = nullptr;
+    D3D12_RANGE noRead = { 0, 0 };
+    if (FAILED(vertexBuffer_->Map(0, &noRead, reinterpret_cast<void**>(&m)))) return;
+    memcpy(m + (size_t)firstVertex * sizeof(Vertex), data, (size_t)count * sizeof(Vertex));
+    vertexBuffer_->Unmap(0, nullptr);
+}
+
 void RenderingSystem::BuildBuffers2(const std::vector<Vertex>& verts, const std::vector<UINT>& idxs)
 {
     indexCount2_ = (UINT)idxs.size();
@@ -1963,11 +2018,7 @@ void RenderingSystem::BuildBuffers2(const std::vector<Vertex>& verts, const std:
 
     auto CopySlot = [&](int from, int to)
         {
-            D3D12_CPU_DESCRIPTOR_HANDLE s = srvHeap_->GetCPUDescriptorHandleForHeapStart();
-            s.ptr += (SIZE_T)from * srvDescSize_;
-            D3D12_CPU_DESCRIPTOR_HANDLE d = srvHeap_->GetCPUDescriptorHandleForHeapStart();
-            d.ptr += (SIZE_T)to * srvDescSize_;
-            device_->CopyDescriptorsSimple(1, d, s, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            CreateSRVInSlot(slotRes_[from], DXGI_FORMAT_R8G8B8A8_UNORM, to);
         };
     CopySlot(SRV_FALLBACK_ALBEDO, mesh2SrvBase_ + 0);
     CopySlot(SRV_COMMON_ALBEDO2, mesh2SrvBase_ + 1);
@@ -1979,11 +2030,7 @@ void RenderingSystem::UploadTextureMesh2(const TextureData& td, int slot)
 {
     if (slot < 0 || slot >= 4 || !td.valid) return;
     int tempSlot = UploadTextureToHeap(td);
-    D3D12_CPU_DESCRIPTOR_HANDLE s = srvHeap_->GetCPUDescriptorHandleForHeapStart();
-    s.ptr += (SIZE_T)tempSlot * srvDescSize_;
-    D3D12_CPU_DESCRIPTOR_HANDLE d = srvHeap_->GetCPUDescriptorHandleForHeapStart();
-    d.ptr += (SIZE_T)(mesh2SrvBase_ + slot) * srvDescSize_;
-    device_->CopyDescriptorsSimple(1, d, s, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    CreateSRVInSlot(slotRes_[tempSlot], DXGI_FORMAT_R8G8B8A8_UNORM, mesh2SrvBase_ + slot);
 }
 
 void RenderingSystem::MakeUploadBuffer(const void* data, UINT64 byteSize, ComPtr<ID3D12Resource>& buf)

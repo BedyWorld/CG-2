@@ -76,7 +76,7 @@ public:
     int  statSubTotal_ = 0;
     
     float sunAzimuthDeg_ = 30.f;
-    float sunElevationDeg_ = 45.f;
+    float sunElevationDeg_ = 8.0f;
     float atmoRayleigh_ = 1.0f, atmoRayleighT_ = 1.0f;
     float atmoMie_ = 0.5f, atmoMieT_ = 0.5f;
     bool  atmoOnObjects_ = true;
@@ -85,7 +85,7 @@ public:
 
     bool  frustumCullEnabled_ = true;
     bool  octreeCullEnabled_ = true;
-    bool  tessEnabled_ = true;
+    bool  tessEnabled_ = false;
     bool  instancesEnabled_ = false;
     bool  xrayEnabled_ = true;
     bool  shadowsEnabled_ = true;
@@ -104,7 +104,7 @@ public:
 
     void BuildWaterPlane();
     WaterCB waterCB_ = {};
-    bool    waterEnabled_ = true;
+    bool    waterEnabled_ = false;
     float   waterHeight_ = 9.5f;
     float waterAmpScale_ = 1.0f;
 

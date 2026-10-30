@@ -63,6 +63,8 @@ public:
     int  CreateTerrainHeightmap(const std::vector<float>& heights, int mapSize);
     bool HasTerrain() const { return indexCountTerrain_ > 0 && terrainTileCount_ > 0; }
     static const int MAX_TERRAIN_TILES = 16;
+    
+    void UpdateMesh1Vertices(UINT firstVertex, const Vertex* data, UINT count);
 
     void BuildMesh1(const std::vector<Vertex>& verts,
         const std::vector<UINT>& idxs,
@@ -72,18 +74,16 @@ public:
         const std::vector<std::wstring>& subNormal,
         const std::vector<std::wstring>& subDisp);
 
+
     void BuildBuffers2(const std::vector<Vertex>& verts, const std::vector<UINT>& idxs);
 
-    // ---- Текстуры mesh2 (slot 0..3) ----
     void UploadTextureMesh2(const TextureData& td, int slot);
 
-    // ---- Константные буферы ----
     void CreateConstantBuffers();
     void UpdateGeometryPassCB(const ConstantBufferData& data);
     void UpdateGeometryPassCB2(const ConstantBufferData& data);
     void UpdateLightingPassCB(const LightingPassCB& data);
 
-    // ---- Источники света ----
     void ClearLights();
     void AddDirectionalLight(XMFLOAT3 direction, XMFLOAT3 color, float intensity);
     void AddPointLight(XMFLOAT3 position, XMFLOAT3 color, float intensity, float range);
@@ -327,20 +327,19 @@ private:
     UINT                              indexCount_ = 0;
     std::vector<SubDrawCall>          subDrawCalls_;
 
-    // ---- Mesh2 ----
     ComPtr<ID3D12Resource>            vertexBuffer2_;
     ComPtr<ID3D12Resource>            indexBuffer2_;
     D3D12_VERTEX_BUFFER_VIEW          vbView2_ = {};
     D3D12_INDEX_BUFFER_VIEW           ibView2_ = {};
     UINT                              indexCount2_ = 0;
-    // Mesh2 текстуры: 4 слота начиная с mesh2SrvBase_
+
     int                               mesh2SrvBase_ = 0;
 
-    // Все загруженные GPU-ресурсы (для lifetime)
     std::vector<ComPtr<ID3D12Resource>> texResources_;
+    std::vector<ID3D12Resource*>        slotRes_;
     std::vector<ComPtr<ID3D12Resource>> texUploads_;
 
-    // Кэш путь -> SRV слот
+
     std::unordered_map<std::wstring, int> texCache_;
 
     ComPtr<ID3D12Resource>            geometryCB_;

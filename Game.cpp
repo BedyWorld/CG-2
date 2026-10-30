@@ -6,6 +6,8 @@
 #include <cfloat>
 #include <random>
 #include <unordered_map>
+#include <fstream>
+#include <sstream>
 
 
 static const float kTaaAlphas[4] = { 0.05f, 0.10f, 0.20f, 1.00f };
@@ -19,6 +21,10 @@ static const float kAtmoMieG = 0.76f;
 static const float kAtmoMetersPerUnit = 40.0f;
 static const float kAtmoMieClean = 0.5f;
 static const float kAtmoMieDirty = 5.0f;
+
+static const float kBeamStrength = 0.015f;
+static const float kBeamG = 0.55f;
+static bool g_beams = true;
 
 static inline XMFLOAT3 F3Add(XMFLOAT3 a, XMFLOAT3 b) { return { a.x + b.x,a.y + b.y,a.z + b.z }; }
 static inline XMFLOAT3 F3Sub(XMFLOAT3 a, XMFLOAT3 b) { return { a.x - b.x,a.y - b.y,a.z - b.z }; }
@@ -49,7 +55,7 @@ bool Game::Initialize()
         rs_->ReleaseTextureUploadBuffers();
         { LoadTimer t("CB + тени + частицы"); rs_->CreateConstantBuffers(); }
         { LoadTimer t("октодерево (300 объектов)"); BuildSceneObjects(); }
-        
+
         {
             LoadTimer t("terrain");
 
@@ -149,6 +155,7 @@ void Game::OnKeyDown(int vkey)
     if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) waterAmpScale_ = max(waterAmpScale_ - 0.1f, 0.0f);
     if (vkey == 'T') { tessEnabled_ = !tessEnabled_; return; }
     if (vkey == 'X') { xrayEnabled_ = !xrayEnabled_; return; }
+    if (vkey == 'U') { g_beams = !g_beams; return; }
     if (vkey == 'J') { taaEnabled_ = !taaEnabled_; rs_->SetTaaEnabled(taaEnabled_); return; }
     if (vkey == 'K') { taaAlphaIdx_ = (taaAlphaIdx_ + 1) % 4; rs_->SetTaaAlpha(kTaaAlphas[taaAlphaIdx_]); return; }
     if (vkey == 'N') { cbrMode_ = (cbrMode_ + 1) % 3; rs_->SetCbr(cbrMode_); return; }
@@ -186,6 +193,357 @@ void Game::SetMeshForRaycast(const std::vector<Vertex>& verts, const std::vector
     meshVerts_ = verts; meshIdxs_ = idxs;
     { LoadTimer _t("BuildBVH (трассировка)"); BuildBVH(); }
 }
+//happyborgor
+static const wchar_t* kHbFile = L"SH_Happy_Burger.obj";
+static const float    kHbTargetLength = 40.0f;
+static const float    kHbRotateXDeg = 0.0f;
+static const float    kHbRotateYDeg = 0.0f;
+static const bool     kHbMirrorX = false;
+
+static const bool     kMiniEnabled = true;
+static const float    kMiniTargetLength = 2.5f;
+static const float    kMiniRotateYDeg = 0.0f;
+static const XMFLOAT3 kMiniPos = { -10.0f, 3.64f, -2.76f };
+
+static const std::unordered_map<std::wstring, int> kHbMatToTex = {
+};
+
+static const std::vector<XMFLOAT3> kLampPositions = {
+    { 0.0f, 7.0f, 0.0f },
+};
+static const XMFLOAT3 kLampColor = { 1.0f, 0.85f, 0.6f };
+static const float    kLampIntensity = 120.0f;
+static const float    kLampRange = 20.0f;
+static const float    kLampInnerDeg = 22.0f;
+static const float    kLampOuterDeg = 38.0f;
+
+
+struct ScenePiece
+{
+    ObjResult                 obj;
+    std::vector<std::wstring> diff, norm, disp;
+    bool ok() const { return obj.valid && !obj.subMeshes.empty(); }
+};
+
+static bool FileExistsW(const std::wstring& p)
+{
+    const DWORD a = GetFileAttributesW(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static std::wstring FileNameOnly(const std::wstring& p)
+{
+    const size_t s = p.find_last_of(L"\\/");
+    return s == std::wstring::npos ? p : p.substr(s + 1);
+}
+
+static void PieceBounds(const ObjResult& o, XMFLOAT3& mn, XMFLOAT3& mx)
+{
+    mn = { FLT_MAX,  FLT_MAX,  FLT_MAX };
+    mx = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+    for (const Vertex& v : o.vertices)
+    {
+        mn.x = fminf(mn.x, v.Position.x); mn.y = fminf(mn.y, v.Position.y); mn.z = fminf(mn.z, v.Position.z);
+        mx.x = fmaxf(mx.x, v.Position.x); mx.y = fmaxf(mx.y, v.Position.y); mx.z = fmaxf(mx.z, v.Position.z);
+    }
+}
+
+static void TransformPiece(ObjResult& o, CXMMATRIX m, bool flipWinding)
+{
+    for (Vertex& v : o.vertices)
+    {
+        const XMVECTOR p = XMVector3TransformCoord(XMLoadFloat3(&v.Position), m);
+        const XMVECTOR n = XMVector3Normalize(XMVector3TransformNormal(XMLoadFloat3(&v.Normal), m));
+        XMStoreFloat3(&v.Position, p);
+        XMStoreFloat3(&v.Normal, n);
+    }
+    if (flipWinding)
+        for (size_t i = 0; i + 2 < o.indices.size(); i += 3)
+            std::swap(o.indices[i + 1], o.indices[i + 2]);
+}
+
+static std::wstring FindHbMtl(const std::wstring& dir)
+{
+    const wchar_t* names[] = { L"SH_Happy_Burger.mtl", L"SH3_Happy_Burger.mtl" };
+    for (const wchar_t* n : names)
+        if (FileExistsW(dir + n)) return dir + n;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"*Burger*.mtl").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return L"";
+    std::wstring r = dir + fd.cFileName;
+    FindClose(h);
+    return r;
+}
+
+static std::unordered_map<std::string, std::wstring> ReadMtlDiffuse(const std::wstring& mtlPath)
+{
+    std::unordered_map<std::string, std::wstring> r;
+    std::ifstream f(mtlPath);
+    std::string line, cur;
+    while (std::getline(f, line))
+    {
+        std::istringstream ss(line);
+        std::string tok;
+        ss >> tok;
+        if (tok == "newmtl")
+        {
+            ss >> cur;
+        }
+        else if (tok == "map_Kd" && !cur.empty())
+        {
+            std::string rest;
+            std::getline(ss, rest);
+            const size_t b = rest.find_first_not_of(" \t");
+            const size_t e = rest.find_last_not_of(" \t\r\n");
+            if (b == std::string::npos) continue;
+            rest = rest.substr(b, e - b + 1);
+            const size_t sl = rest.find_last_of("\\/");
+            if (sl != std::string::npos) rest = rest.substr(sl + 1);
+            r[cur] = std::wstring(rest.begin(), rest.end());
+        }
+    }
+    return r;
+}
+
+static std::wstring ResolveTextureFile(const std::wstring& dir, const std::wstring& name)
+{
+    std::vector<std::wstring> names = { name };
+    if (name.size() > 3 && (name.compare(0, 3, L"GB_") == 0 || name.compare(0, 3, L"gb_") == 0))
+        names.push_back(name.substr(3));
+    for (const std::wstring& n : names)
+    {
+        const std::wstring cand[3] = { dir + n, dir + L"textures\\" + n, dir + L"Textures\\" + n };
+        for (const std::wstring& c : cand)
+            if (FileExistsW(c)) return c;
+    }
+    return L"";
+}
+
+static ScenePiece LoadHappyBurgerPiece(const std::wstring& dir)
+{
+    ScenePiece p;
+    p.obj = LoadObj(dir + kHbFile);
+    if (!p.ok())
+    {
+        OutputDebugStringA("SH_Happy_Burger.obj не найден");
+        return p;
+    }
+
+    XMMATRIX r = XMMatrixRotationX(XMConvertToRadians(kHbRotateXDeg)) *
+        XMMatrixRotationY(XMConvertToRadians(kHbRotateYDeg));
+    if (kHbMirrorX) r = r * XMMatrixScaling(-1.f, 1.f, 1.f);
+    TransformPiece(p.obj, r, kHbMirrorX);
+
+    XMFLOAT3 mn, mx;
+    PieceBounds(p.obj, mn, mx);
+    const float longest = fmaxf(mx.x - mn.x, mx.z - mn.z);
+    const float s = longest > 1e-6f ? kHbTargetLength / longest : 1.0f;
+    const XMMATRIX m = XMMatrixTranslation(-(mn.x + mx.x) * 0.5f, -mn.y, -(mn.z + mx.z) * 0.5f) *
+        XMMatrixScaling(s, s, s);
+    TransformPiece(p.obj, m, false);
+
+    for (Vertex& v : p.obj.vertices) v.Color = { 1.f, 1.f, 1.f, 1.f };
+
+    char msg[256];
+    sprintf_s(msg, "[HB] исходный размер (после поворота): %.2f x %.2f x %.2f, масштаб = %.5f, подмешей: %d\n",
+        mx.x - mn.x, mx.y - mn.y, mx.z - mn.z, s, (int)p.obj.subMeshes.size());
+    OutputDebugStringA(msg);
+
+    const std::wstring mtlPath = FindHbMtl(dir);
+    const std::unordered_map<std::string, std::wstring> mtlTex = mtlPath.empty()
+        ? std::unordered_map<std::string, std::wstring>() : ReadMtlDiffuse(mtlPath);
+    {
+        char head[512];
+        sprintf_s(head, "[HB] mtl: %ls, записей map_Kd: %d\n",
+            mtlPath.empty() ? L"НЕ НАЙДЕН" : mtlPath.c_str(), (int)mtlTex.size());
+        OutputDebugStringA(head);
+    }
+
+    for (size_t i = 0; i < p.obj.subMeshes.size(); ++i)
+    {
+        const SubMesh& sm = p.obj.subMeshes[i];
+        const std::wstring matW(sm.materialName.begin(), sm.materialName.end());
+        std::wstring tex;
+        const char* how = "нет текстуры (серый)";
+
+        auto ov = kHbMatToTex.find(matW);
+        if (ov != kHbMatToTex.end())
+        {
+            tex = dir + L"Tex_" + std::to_wstring(ov->second) + L".png";
+            how = "ручная таблица";
+        }
+
+        if (tex.empty())
+        {
+            auto it = mtlTex.find(sm.materialName);
+            if (it != mtlTex.end())
+            {
+                tex = ResolveTextureFile(dir, it->second);
+                if (!tex.empty()) how = "из .mtl";
+            }
+        }
+
+        if (tex.empty() && !sm.diffusePath.empty())
+        {
+            tex = ResolveTextureFile(dir, FileNameOnly(sm.diffusePath));
+            if (!tex.empty()) how = "из .mtl (ObjLoader)";
+        }
+
+        p.diff.push_back(tex);
+        p.norm.push_back(L"");
+        p.disp.push_back(L"");
+
+        char line[400];
+        sprintf_s(line, "[HB] подмеш %3d  материал '%s'  ->  %ls   (%s)\n", (int)i, sm.materialName.c_str(),
+            tex.empty() ? L"-" : FileNameOnly(tex).c_str(), how);
+        OutputDebugStringA(line);
+    }
+    return p;
+}
+
+//шпонз
+static ScenePiece LoadSponzaPiece(const std::wstring& dir, bool noDisp)
+{
+    ScenePiece p;
+    p.obj = LoadObj(dir + L"sponza.obj");
+    if (!p.ok()) return p;
+
+    struct MatEntry { const wchar_t* diff; const wchar_t* norm; const wchar_t* disp; };
+    static const std::unordered_map<std::wstring, MatEntry> kMatMap = {
+        { L"arch", { L"sponza_arch_diff.tga", L"sponza_arch_ddn.tga", L"sponza_arch_disp.tga" } },
+        { L"bricks", { L"spnza_bricks_a_diff.tga", L"spnza_bricks_a_ddn.tga", L"spnza_bricks_a_disp.tga" } },
+        { L"ceiling", { L"sponza_ceiling_a_diff.tga", L"sponza_ceiling_a_ddn.tga", L"sponza_ceiling_a_disp.tga" } },
+        { L"chain", { L"chain_texture.tga", L"chain_texture_ddn.tga", L"chain_texture_disp.tga" } },
+        { L"column_a", { L"sponza_column_a_diff.tga", L"sponza_column_a_ddn.tga", L"sponza_column_a_disp.tga" } },
+        { L"column_b", { L"sponza_column_c_diff.tga", L"sponza_column_b_ddn.tga", L"sponza_column_b_disp.tga" } },
+        { L"column_c", { L"sponza_column_c_diff.tga", L"sponza_column_c_ddn.tga", L"sponza_column_c_disp.tga" } },
+        { L"details", { L"sponza_details_diff.tga", L"sponza_details_ddn.tga", L"sponza_details_disp.tga" } },
+        { L"fabric_a", { L"sponza_curtain_diff.tga", L"sponza_curtain_ddn.tga", L"sponza_curtain_disp.tga" } },
+        { L"fabric_c", { L"sponza_curtain_blue_diff.tga", L"sponza_curtain_ddn.tga", L"sponza_curtain_disp.tga" } },
+        { L"fabric_d", { L"sponza_curtain_diff.tga", L"sponza_curtain_ddn.tga", L"sponza_curtain_disp.tga" } },
+        { L"fabric_e", { L"sponza_curtain_green_diff.tga", L"sponza_curtain_ddn.tga", L"sponza_curtain_disp.tga" } },
+        { L"fabric_f", { L"sponza_fabric_diff.tga", L"sponza_fabric_ddn.tga", L"sponza_fabric_disp.tga" } },
+        { L"fabric_g", { L"sponza_fabric_green_diff.tga", L"sponza_fabric_ddn.tga", L"sponza_fabric_disp.tga" } },
+        { L"flagpole", { L"sponza_flagpole_diff.tga", L"sponza_flagpole_ddn.tga", L"sponza_flagpole_disp.tga" } },
+        { L"floor", { L"sponza_floor_a_diff.tga", L"sponza_floor_a_ddn.tga", L"sponza_floor_a_disp.tga" } },
+        { L"leaf", { L"sponza_thorn_diff.tga", L"sponza_thorn_ddn.tga", L"sponza_thorn_disp.tga" } },
+        { L"roof", { L"sponza_roof_diff.tga", L"sponza_roof_ddn.tga", L"sponza_roof_disp.tga" } },
+        { L"vase", { L"vase_dif.tga", L"vase_ddn.tga", L"vase_disp.tga" } },
+        { L"vase_hanging", { L"vase_hanging.tga", L"vase_hanging_ddn.tga", L"vase_hanging_disp.tga" } },
+        { L"vase_round", { L"vase_round.tga", L"vase_round_ddn.tga", L"vase_round_disp.tga" } },
+        { L"Material__25", { L"background.tga", L"background_ddn.tga", L"background_disp.tga" } },
+        { L"Material__298", { L"background.tga", L"background_ddn.tga", L"background_disp.tga" } },
+        { L"Material__47", { L"lion.tga", L"lion_ddn.tga", L"lion_disp.tga" } },
+        { L"Material__57", { L"lion.tga", L"lion2_ddn.tga", L"lion2_disp.tga" } },
+    };
+
+    auto StripSuffix = [](const std::string& name) -> std::wstring
+        {
+            std::wstring w(name.begin(), name.end());
+            auto dot = w.rfind(L'.');
+            if (dot != std::wstring::npos)
+            {
+                std::wstring suffix = w.substr(dot + 1);
+                bool allDigits = !suffix.empty();
+                for (auto c : suffix) if (!iswdigit(c)) { allDigits = false; break; }
+                if (allDigits) w = w.substr(0, dot);
+            }
+            return w;
+        };
+
+    for (const SubMesh& sm : p.obj.subMeshes)
+    {
+        auto it = kMatMap.find(StripSuffix(sm.materialName));
+        if (it != kMatMap.end())
+        {
+            p.diff.push_back(dir + it->second.diff);
+            p.norm.push_back(dir + it->second.norm);
+            p.disp.push_back(noDisp ? std::wstring(L"-") : dir + it->second.disp);
+        }
+        else
+        {
+            p.diff.push_back(L"");
+            p.norm.push_back(L"");
+            p.disp.push_back(L"");
+        }
+    }
+    return p;
+}
+
+static void PlaceSponzaMini(ScenePiece& p)
+{
+    TransformPiece(p.obj, XMMatrixRotationY(XMConvertToRadians(kMiniRotateYDeg)), false);
+
+    XMFLOAT3 mn, mx;
+    PieceBounds(p.obj, mn, mx);
+    const float longest = fmaxf(mx.x - mn.x, mx.z - mn.z);
+    const float s = longest > 1e-6f ? kMiniTargetLength / longest : 1.0f;
+    const XMMATRIX m = XMMatrixTranslation(-(mn.x + mx.x) * 0.5f, -mn.y, -(mn.z + mx.z) * 0.5f) *
+        XMMatrixScaling(s, s, s) *
+        XMMatrixTranslation(kMiniPos.x, kMiniPos.y, kMiniPos.z);
+    TransformPiece(p.obj, m, false);
+
+    char msg[160];
+    sprintf_s(msg, "[Sponza mini] масштаб = %.5f, основание в (%.2f, %.2f, %.2f)\n",
+        s, kMiniPos.x, kMiniPos.y, kMiniPos.z);
+    OutputDebugStringA(msg);
+}
+
+static void AppendPiece(const ScenePiece& p,
+    std::vector<Vertex>& verts, std::vector<UINT>& idxs,
+    std::vector<UINT>& starts, std::vector<UINT>& counts,
+    std::vector<std::wstring>& diff, std::vector<std::wstring>& norm, std::vector<std::wstring>& disp)
+{
+    const UINT vBase = static_cast<UINT>(verts.size());
+    const UINT iBase = static_cast<UINT>(idxs.size());
+    verts.insert(verts.end(), p.obj.vertices.begin(), p.obj.vertices.end());
+    for (UINT i : p.obj.indices) idxs.push_back(i + vBase);
+    for (size_t k = 0; k < p.obj.subMeshes.size(); ++k)
+    {
+        starts.push_back(p.obj.subMeshes[k].indexStart + iBase);
+        counts.push_back(p.obj.subMeshes[k].indexCount);
+        diff.push_back(p.diff[k]);
+        norm.push_back(p.norm[k]);
+        disp.push_back(p.disp[k]);
+    }
+}
+
+struct MiniState
+{
+    bool                active = false;
+    XMFLOAT3            pos = { 0.f, 0.f, 0.f };
+    UINT                firstVertex = 0;
+    size_t              firstSub = 0;
+    std::vector<Vertex> local;
+    std::vector<AABB>   localBounds;
+    std::vector<Vertex> scratch;
+    bool                bvhDirty = false;
+    float               idle = 0.f;
+};
+static MiniState g_mini;
+
+static void MiniApplyPosition(RenderingSystem* rs, std::vector<Vertex>& meshVerts, std::vector<AABB>& bounds)
+{
+    const size_t n = g_mini.local.size();
+    if (!g_mini.active || g_mini.firstVertex + n > meshVerts.size()) return;
+    g_mini.scratch = g_mini.local;
+    for (size_t i = 0; i < n; ++i)
+    {
+        g_mini.scratch[i].Position.x += g_mini.pos.x;
+        g_mini.scratch[i].Position.y += g_mini.pos.y;
+        g_mini.scratch[i].Position.z += g_mini.pos.z;
+        meshVerts[g_mini.firstVertex + i].Position = g_mini.scratch[i].Position;
+    }
+    rs->UpdateMesh1Vertices(g_mini.firstVertex, g_mini.scratch.data(), static_cast<UINT>(n));
+    for (size_t k = 0; k < g_mini.localBounds.size(); ++k)
+    {
+        if (g_mini.firstSub + k >= bounds.size()) break;
+        AABB b = g_mini.localBounds[k];
+        b.Min.x += g_mini.pos.x; b.Min.y += g_mini.pos.y; b.Min.z += g_mini.pos.z;
+        b.Max.x += g_mini.pos.x; b.Max.y += g_mini.pos.y; b.Max.z += g_mini.pos.z;
+        bounds[g_mini.firstSub + k] = b;
+    }
+}
 
 void Game::LoadSceneGeometry()
 {
@@ -194,77 +552,33 @@ void Game::LoadSceneGeometry()
     std::wstring dir(exePath);
     dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
 
-    ObjResult obj = LoadObj(dir + L"sponza.obj");
+    ScenePiece hb = LoadHappyBurgerPiece(dir);
+    ScenePiece sp = LoadSponzaPiece(dir, /*noDisp*/ hb.ok());
 
-    if (obj.valid && !obj.subMeshes.empty())
+    std::vector<Vertex>       verts;
+    std::vector<UINT>         idxs, starts, counts;
+    std::vector<std::wstring> diffPaths, normPaths, dispPaths;
+
+    bool   miniPlaced = false;
+    UINT   miniFirstVertex = 0;
+    size_t miniFirstSub = 0;
+
+    if (hb.ok())
+        AppendPiece(hb, verts, idxs, starts, counts, diffPaths, normPaths, dispPaths);
+    if (sp.ok() && (!hb.ok() || kMiniEnabled))
     {
-        struct MatEntry { const wchar_t* diff; const wchar_t* norm; const wchar_t* disp; };
-        static const std::unordered_map<std::wstring, MatEntry> kMatMap = {
-            { L"arch", { L"sponza_arch_diff.tga", L"sponza_arch_ddn.tga", L"sponza_arch_disp.tga" } },
-            { L"bricks", { L"spnza_bricks_a_diff.tga", L"spnza_bricks_a_ddn.tga", L"spnza_bricks_a_disp.tga" } },
-            { L"ceiling", { L"sponza_ceiling_a_diff.tga", L"sponza_ceiling_a_ddn.tga", L"sponza_ceiling_a_disp.tga" } },
-            { L"chain", { L"chain_texture.tga", L"chain_texture_ddn.tga", L"chain_texture_disp.tga" } },
-            { L"column_a", { L"sponza_column_a_diff.tga", L"sponza_column_a_ddn.tga", L"sponza_column_a_disp.tga" } },
-            { L"column_b", { L"sponza_column_c_diff.tga", L"sponza_column_b_ddn.tga", L"sponza_column_b_disp.tga" } },
-            { L"column_c", { L"sponza_column_c_diff.tga", L"sponza_column_c_ddn.tga", L"sponza_column_c_disp.tga" } },
-            { L"details", { L"sponza_details_diff.tga", L"sponza_details_ddn.tga", L"sponza_details_disp.tga" } },
-            { L"fabric_a", { L"sponza_curtain_diff.tga", L"sponza_curtain_ddn.tga", L"sponza_curtain_disp.tga" } },
-            { L"fabric_c", { L"sponza_curtain_blue_diff.tga", L"sponza_curtain_ddn.tga", L"sponza_curtain_disp.tga" } },
-            { L"fabric_d", { L"sponza_curtain_diff.tga", L"sponza_curtain_ddn.tga", L"sponza_curtain_disp.tga" } },
-            { L"fabric_e", { L"sponza_curtain_green_diff.tga", L"sponza_curtain_ddn.tga", L"sponza_curtain_disp.tga" } },
-            { L"fabric_f", { L"sponza_fabric_diff.tga", L"sponza_fabric_ddn.tga", L"sponza_fabric_disp.tga" } },
-            { L"fabric_g", { L"sponza_fabric_green_diff.tga", L"sponza_fabric_ddn.tga", L"sponza_fabric_disp.tga" } },
-            { L"flagpole", { L"sponza_flagpole_diff.tga", L"sponza_flagpole_ddn.tga", L"sponza_flagpole_disp.tga" } },
-            { L"floor", { L"sponza_floor_a_diff.tga", L"sponza_floor_a_ddn.tga", L"sponza_floor_a_disp.tga" } },
-            { L"leaf", { L"sponza_thorn_diff.tga", L"sponza_thorn_ddn.tga", L"sponza_thorn_disp.tga" } },
-            { L"roof", { L"sponza_roof_diff.tga", L"sponza_roof_ddn.tga", L"sponza_roof_disp.tga" } },
-            { L"vase", { L"vase_dif.tga", L"vase_ddn.tga", L"vase_disp.tga" } },
-            { L"vase_hanging", { L"vase_hanging.tga", L"vase_hanging_ddn.tga", L"vase_hanging_disp.tga" } },
-            { L"vase_round", { L"vase_round.tga", L"vase_round_ddn.tga", L"vase_round_disp.tga" } },
-            { L"Material__25", { L"background.tga", L"background_ddn.tga", L"background_disp.tga" } },
-            { L"Material__298", { L"background.tga", L"background_ddn.tga", L"background_disp.tga" } },
-            { L"Material__47", { L"lion.tga", L"lion_ddn.tga", L"lion_disp.tga" } },
-            { L"Material__57", { L"lion.tga", L"lion2_ddn.tga", L"lion2_disp.tga" } },
-        };
-
-        auto StripSuffix = [](const std::string& name) -> std::wstring
-            {
-                std::wstring w(name.begin(), name.end());
-                auto dot = w.rfind(L'.');
-                if (dot != std::wstring::npos)
-                {
-                    std::wstring suffix = w.substr(dot + 1);
-                    bool allDigits = !suffix.empty();
-                    for (auto c : suffix) if (!iswdigit(c)) { allDigits = false; break; }
-                    if (allDigits) w = w.substr(0, dot);
-                }
-                return w;
-            };
-
-        std::vector<UINT>         starts, counts;
-        std::vector<std::wstring> diffPaths, normPaths, dispPaths;
-
-        for (auto& sm : obj.subMeshes)
+        if (hb.ok())
         {
-            starts.push_back(sm.indexStart);
-            counts.push_back(sm.indexCount);
-
-            std::wstring key = StripSuffix(sm.materialName);
-            auto it = kMatMap.find(key);
-            if (it != kMatMap.end())
-            {
-                diffPaths.push_back(dir + it->second.diff);
-                normPaths.push_back(dir + it->second.norm);
-                dispPaths.push_back(dir + it->second.disp);
-            }
-            else
-            {
-                diffPaths.push_back(L"");
-                normPaths.push_back(L"");
-                dispPaths.push_back(L"");
-            }
+            PlaceSponzaMini(sp);
+            miniPlaced = true;
+            miniFirstVertex = static_cast<UINT>(verts.size());
+            miniFirstSub = starts.size();
         }
+        AppendPiece(sp, verts, idxs, starts, counts, diffPaths, normPaths, dispPaths);
+    }
 
+    if (!starts.empty())
+    {
         sponzaBounds_.clear();
         sponzaBounds_.reserve(starts.size());
         for (size_t sm = 0; sm < starts.size(); ++sm)
@@ -273,9 +587,9 @@ void Game::LoadSceneGeometry()
             b.Min = { FLT_MAX,  FLT_MAX,  FLT_MAX };
             b.Max = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
             const UINT from = starts[sm], to = starts[sm] + counts[sm];
-            for (UINT k = from; k < to && k < obj.indices.size(); ++k)
+            for (UINT k = from; k < to && k < idxs.size(); ++k)
             {
-                const XMFLOAT3& p = obj.vertices[obj.indices[k]].Position;
+                const XMFLOAT3& p = verts[idxs[k]].Position;
                 b.Min.x = fminf(b.Min.x, p.x); b.Min.y = fminf(b.Min.y, p.y); b.Min.z = fminf(b.Min.z, p.z);
                 b.Max.x = fmaxf(b.Max.x, p.x); b.Max.y = fmaxf(b.Max.y, p.y); b.Max.z = fmaxf(b.Max.z, p.z);
             }
@@ -293,14 +607,33 @@ void Game::LoadSceneGeometry()
             sponzaBounds_.push_back(b);
         }
 
-        rs_->BuildMesh1(obj.vertices, obj.indices, starts, counts,
-            diffPaths, normPaths, dispPaths);
-        SetMeshForRaycast(obj.vertices, obj.indices);
+        rs_->BuildMesh1(verts, idxs, starts, counts, diffPaths, normPaths, dispPaths);
+        if (miniPlaced)
+        {
+            g_mini.active = true;
+            g_mini.pos = kMiniPos;
+            g_mini.firstVertex = miniFirstVertex;
+            g_mini.firstSub = miniFirstSub;
+            g_mini.local.assign(verts.begin() + miniFirstVertex,
+                verts.begin() + miniFirstVertex + sp.obj.vertices.size());
+            for (Vertex& v : g_mini.local)
+            {
+                v.Position.x -= kMiniPos.x; v.Position.y -= kMiniPos.y; v.Position.z -= kMiniPos.z;
+            }
+            g_mini.localBounds.clear();
+            for (size_t k = miniFirstSub; k < sponzaBounds_.size(); ++k)
+            {
+                AABB b = sponzaBounds_[k];
+                b.Min.x -= kMiniPos.x; b.Min.y -= kMiniPos.y; b.Min.z -= kMiniPos.z;
+                b.Max.x -= kMiniPos.x; b.Max.y -= kMiniPos.y; b.Max.z -= kMiniPos.z;
+                g_mini.localBounds.push_back(b);
+            }
+        }
+        SetMeshForRaycast(verts, idxs);
         return;
     }
 
-    std::vector<Vertex> verts;
-    std::vector<UINT>   idxs;
+    verts.clear(); idxs.clear();
     auto addFace = [&](XMFLOAT3 p0, XMFLOAT3 p1, XMFLOAT3 p2, XMFLOAT3 p3, XMFLOAT3 n)
         {
             UINT base = static_cast<UINT>(verts.size());
@@ -336,18 +669,18 @@ void Game::LoadSceneGeometry2()
     const int SLICES = 16, STACKS = 8;
     std::vector<Vertex> verts;
     std::vector<UINT>   idxs;
-    for (int st = 0;st <= STACKS;++st)
+    for (int st = 0; st <= STACKS; ++st)
     {
         float phi = PI * float(st) / float(STACKS);
-        for (int sl = 0;sl <= SLICES;++sl)
+        for (int sl = 0; sl <= SLICES; ++sl)
         {
             float theta = 2.0f * PI * float(sl) / float(SLICES);
             float x = sinf(phi) * cosf(theta), y = cosf(phi), z = sinf(phi) * sinf(theta);
             verts.push_back({ {x,y,z},{x,y,z},{1,1,1,1},{float(sl) / SLICES,float(st) / STACKS} });
         }
     }
-    for (int st = 0;st < STACKS;++st)
-        for (int sl = 0;sl < SLICES;++sl)
+    for (int st = 0; st < STACKS; ++st)
+        for (int sl = 0; sl < SLICES; ++sl)
         {
             UINT a = st * (SLICES + 1) + sl, b = (st + 1) * (SLICES + 1) + sl;
             UINT c = (st + 1) * (SLICES + 1) + sl + 1, d = st * (SLICES + 1) + sl + 1;
@@ -423,8 +756,8 @@ void Game::LoadSceneTextures2()
         const UINT SZ = 128;
         tdD.width = tdD.height = SZ;
         tdD.pixels.resize(SZ * SZ * 4); tdD.valid = true;
-        for (UINT y = 0;y < SZ;++y)
-            for (UINT x = 0;x < SZ;++x)
+        for (UINT y = 0; y < SZ; ++y)
+            for (UINT x = 0; x < SZ; ++x)
             {
                 float fx = float(x) / SZ, fy = float(y) / SZ;
                 float v = 0.5f + 0.5f * sinf(fx * 8.f * PI) * sinf(fy * 8.f * PI);
@@ -615,7 +948,7 @@ bool Game::RaycastMesh(XMFLOAT3 origin, XMFLOAT3 dir, float maxDist, float& outT
     XMVECTOR dirV = XMVector3Normalize(XMVector3TransformNormal(XMLoadFloat3(&dir), invWorld));
     XMFLOAT3 origOS, dirOS;
     XMStoreFloat3(&origOS, origV); XMStoreFloat3(&dirOS, dirV);
-    
+
     const float kTiny = 1e-8f;
     XMFLOAT3 invDir = {
         1.0f / (fabsf(dirOS.x) < kTiny ? copysignf(kTiny, dirOS.x ? dirOS.x : 1.f) : dirOS.x),
@@ -805,11 +1138,13 @@ void Game::UpdateWindowTitle()
 
     const wchar_t* cbrName = cbrMode_ == 0 ? L"off" : (cbrMode_ == 1 ? L"1px" : L"2px");
 
-    wchar_t buf[320];
+    wchar_t buf[448];
     swprintf_s(buf,
-        L"%.1f ms (%.0f fps) | obj %d/%d %s(I) | Sponza %d/%d shadow %d | cull %s(F/O) %.3fms "
+        L"%.1f ms (%.0f fps) | cam %.1f %.1f %.1f | mini %.2f %.2f %.2f | obj %d/%d %s(I) | Sponza %d/%d shadow %d | cull %s(F/O) %.3fms "
         L"| tess %s(T) | shadows %s(C) | particles %s(P) | wire %s(G) | TAA %s(J) a=%.2f(K) | CBR %s(N)",
         frameMsAvg_, frameMsAvg_ > 0.01f ? 1000.0f / frameMsAvg_ : 0.0f,
+        camPos_.x, camPos_.y, camPos_.z,
+        g_mini.pos.x, g_mini.pos.y, g_mini.pos.z,
         statVisible_, SCENE_OBJECT_COUNT, instancesEnabled_ ? L"on " : L"off",
         statSubVisible_, statSubTotal_, statShadowSubs_,
         mode, statCullMs_,
@@ -818,7 +1153,7 @@ void Game::UpdateWindowTitle()
         particlesEnabled_ ? L"on" : L"off",
         wireframe_ ? L"on" : L"off",
         taaEnabled_ ? L"on" : L"off",
-        kTaaAlphas[taaAlphaIdx_], 
+        kTaaAlphas[taaAlphaIdx_],
         cbrName);
     SetWindowTextW(hwnd_, buf);
 }
@@ -867,12 +1202,39 @@ void Game::Update(float deltaTime)
     if (GetAsyncKeyState('Q') & 0x8000) camPos_.y -= speed * deltaTime;
 
     const float modelSpeed = 3.0f;
-    if (GetAsyncKeyState(VK_LEFT) & 0x8000)  mesh2Pos_.x -= modelSpeed * deltaTime;
-    if (GetAsyncKeyState(VK_RIGHT) & 0x8000) mesh2Pos_.x += modelSpeed * deltaTime;
-    if (GetAsyncKeyState(VK_UP) & 0x8000)    mesh2Pos_.z += modelSpeed * deltaTime;
-    if (GetAsyncKeyState(VK_DOWN) & 0x8000)  mesh2Pos_.z -= modelSpeed * deltaTime;
-    if (GetAsyncKeyState(VK_PRIOR) & 0x8000) mesh2Pos_.y += modelSpeed * deltaTime;
-    if (GetAsyncKeyState(VK_NEXT) & 0x8000)  mesh2Pos_.y -= modelSpeed * deltaTime;
+    XMFLOAT3 mv = { 0.f, 0.f, 0.f };
+    if (GetAsyncKeyState(VK_LEFT) & 0x8000)  mv.x -= modelSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_RIGHT) & 0x8000) mv.x += modelSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_UP) & 0x8000)    mv.z += modelSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_DOWN) & 0x8000)  mv.z -= modelSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_PRIOR) & 0x8000) mv.y += modelSpeed * deltaTime;
+    if (GetAsyncKeyState(VK_NEXT) & 0x8000)  mv.y -= modelSpeed * deltaTime;
+    if (g_mini.active)
+    {
+        mv = { 0.f, 0.f, 0.f };
+        if (GetAsyncKeyState(VK_UP) & 0x8000)   mv.y += modelSpeed * deltaTime;
+        if (GetAsyncKeyState(VK_DOWN) & 0x8000) mv.y -= modelSpeed * deltaTime;
+        if (mv.x != 0.f || mv.y != 0.f || mv.z != 0.f)
+        {
+            g_mini.pos = F3Add(g_mini.pos, mv);
+            MiniApplyPosition(rs_.get(), meshVerts_, sponzaBounds_);
+            g_mini.bvhDirty = true;
+            g_mini.idle = 0.f;
+        }
+        else if (g_mini.bvhDirty)
+        {
+            g_mini.idle += deltaTime;
+            if (g_mini.idle > 0.5f)
+            {
+                BuildBVH();
+                g_mini.bvhDirty = false;
+            }
+        }
+    }
+    else
+    {
+        mesh2Pos_ = F3Add(mesh2Pos_, mv);
+    }
     camForward_ = forward;
 
     XMMATRIX world = XMMatrixIdentity(); worldMatrix_ = world;
@@ -902,7 +1264,7 @@ void Game::Update(float deltaTime)
     }
     ++taaFrame_;
     rs_->SetTaaMatrices(viewProjNoJitter_, prevViewProjNoJitter_);
-    
+
     {
         XMFLOAT4X4 vp;
         XMStoreFloat4x4(&vp, view * proj);
@@ -976,15 +1338,13 @@ void Game::Update(float deltaTime)
         sunToward_ = { cosf(el) * sinf(az), sinf(el), cosf(el) * cosf(az) };
         sunDir_ = { -sunToward_.x, -sunToward_.y, -sunToward_.z };
         sunLightIndex_ = 0;
-        rs_->AddDirectionalLight(sunDir_, { 1.f,.92f,.75f }, 1.4f);
+        const float warm = saturate01(1.0f - sunElevationDeg_ / 35.0f);
+        const XMFLOAT3 sunCol = { 1.0f, 0.92f - 0.45f * warm, 0.75f - 0.6f * warm };
+        rs_->AddDirectionalLight(sunDir_, sunCol, 1.4f + 0.4f * warm);
     }
     { float ma = time_ * 0.15f + PI; rs_->AddDirectionalLight({ sinf(ma),-.4f,cosf(ma) }, { .35f,.4f,.65f }, .3f); }
-    { float a = time_ * .9f, r = 4.5f; rs_->AddPointLight({ cosf(a) * r,1.f,sinf(a) * r }, { 1.f,.15f,.05f }, 6.f, 9.f); }
-    { float a = time_ * .7f + 2.f * PI / 3.f, r = 3.8f; rs_->AddPointLight({ cosf(a) * r,3.f + sinf(time_ * .5f) * 1.5f,sinf(a) * r }, { .1f,.4f,1.f }, 5.f, 10.f); }
-    { float a = time_ * 1.1f + 4.f * PI / 3.f, r = 3.2f; rs_->AddPointLight({ cosf(a) * r,1.5f + cosf(a * .8f) * 2.f,sinf(a) * r }, { .05f,1.f,.3f }, 4.5f, 8.f); }
-    { float sa = time_ * .5f, sr = .6f; XMFLOAT3 sd = F3Norm({ sinf(sa) * sr,-1.f,cosf(sa) * sr }); rs_->AddSpotLight({ -5.f,6.f,-5.f }, sd, { 1.f,.85f,.5f }, 8.f, 14.f, 12.f, 25.f); }
-    { float sa = -time_ * .7f + PI, sr = .5f; XMFLOAT3 sd = F3Norm({ sinf(sa) * sr - .4f,-1.f,cosf(sa) * sr - .4f }); rs_->AddSpotLight({ 5.f,5.f,5.f }, sd, { .8f,.1f,1.f }, 7.f, 12.f, 10.f, 22.f); }
-    { float pulse = .6f + .4f * fabsf(sinf(time_ * 2.5f)); XMFLOAT3 sd = F3Norm({ 0.f,.6f,-1.f }); rs_->AddSpotLight({ 0.f,-3.f,6.f }, sd, { 1.f,1.f,1.f }, 5.f * pulse, 11.f, 8.f, 20.f); }
+    for (const XMFLOAT3& lamp : kLampPositions)
+        rs_->AddSpotLight(lamp, { 0.f, -1.f, 0.f }, kLampColor, kLampIntensity, kLampRange, kLampInnerDeg, kLampOuterDeg);
 
     for (auto& b : bullets_)
         if (b.Active && !b.Stuck)
@@ -1029,7 +1389,7 @@ void Game::Update(float deltaTime)
         particleCB_.SizeMin = 0.10f; particleCB_.SizeSpan = 0.18f;
         particleCB_.Turbulence = 1.4f;
         particleCB_.Buoyancy = 3.6f;
-        particleCB_.SmokeLife = 3.5f; 
+        particleCB_.SmokeLife = 3.5f;
         particleCB_.SmokeParams = { 0.5f, 0.45f, 0.30f, 0.0f };
     }
     {
@@ -1069,6 +1429,7 @@ void Game::Update(float deltaTime)
         lCB.ShadowLightIndex = -1;
     }
     lCB.CameraPos = { camPos_.x,camPos_.y,camPos_.z,1.f };
+    lCB.Padding0 = { g_beams ? kBeamStrength : 0.0f, kBeamG, 0.0f };
     {
         XMMATRIX invV = XMMatrixInverse(nullptr, viewMatrix_);
         const float tanY = tanf(XMConvertToRadians(75.f) * 0.5f);
