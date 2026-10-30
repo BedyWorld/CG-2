@@ -829,14 +829,17 @@ cbuffer LightingCB:register(b0){
     float4 CascadeSplits;
     matrix CameraView;
     int    ShadowLightIndex; float ShadowMapSize; float ShadowBias; float DebugCascades;
+    float4 AtmoCamRight;
+    float4 AtmoCamUp;
+    float4 AtmoCamForward;
+    float4 AtmoSun;
+    float4 AtmoRayleigh;
+    float4 AtmoMie;
 };
 Texture2D gAlbedo:register(t0); Texture2D gNormal:register(t1);
 Texture2D gPBR:register(t2);    Texture2D gWorldPos:register(t3);
 Texture2DArray gShadowMap:register(t4);
 SamplerState gSampler:register(s0);
-// Comparison sampler: the hardware compares depth and filters the
-// comparison RESULT, not the depth values, so a single tap already
-// yields a bilinearly smoothed transition.
 SamplerComparisonState gShadowSampler:register(s1);
 cbuffer CbrCB : register(b1) { float CbrBlock; float CbrParity; float2 CbrPad; };
 struct FSQ{ float4 Pos:SV_POSITION; float2 UV:TEXCOORD0; };
@@ -853,39 +856,29 @@ float3 BP(float3 N,float3 L,float3 V,float3 alb,float rgh,float3 lc){
     float sh=max(2/(rgh*rgh+0.001f)-2,1); float sp=pow(max(dot(N,H),0),sh);
     return alb*d*lc+sp*lc*(1-rgh);
 }
-// Pick the cascade by view-space depth, then sample with PCF.
-// PCF (percentage-closer filtering): instead of one comparison we take
-// a grid of neighbouring texels and average the unshadowed fraction,
-// which gives a soft edge instead of a stair-stepped one.
 float SampleShadowPCF(float3 wp, float viewDepth)
 {
     if (ShadowLightIndex < 0) return 1.0f;
 
-    // Cascades are ordered by increasing far bound
     int c = 0;
     if (viewDepth > CascadeSplits.x) c = 1;
     if (viewDepth > CascadeSplits.y) c = 2;
     if (viewDepth > CascadeSplits.z) c = 3;
-    if (viewDepth > CascadeSplits.w) return 1.0f;   // beyond the last cascade
+    if (viewDepth > CascadeSplits.w) return 1.0f;
 
     float4 lp = mul(float4(wp, 1.0f), ShadowViewProj[c]);
     lp.xyz /= lp.w;
 
-    // NDC -> UV: y flips because texture coordinates grow downwards
     float2 uv = lp.xy * float2(0.5f, -0.5f) + 0.5f;
     if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f ||
         lp.z < 0.0f || lp.z > 1.0f)
-        return 1.0f;                                 // outside the map: leave it lit
+        return 1.0f;
 
-    // Slope-scaled bias is already set on the shadow pass rasterizer,
-    // so only a small constant margin remains here.
     float depth = lp.z - ShadowBias;
 
     float texel = 1.0f / max(ShadowMapSize, 1.0f);
     float sum = 0.0f;
 
-    // 5x5 grid = 25 taps. Constant bounds so it can be unrolled:
-    // the compiler cannot unroll a dynamic loop bound.
     [unroll]
     for (int y = -2; y <= 2; ++y)
     {
@@ -898,6 +891,64 @@ float SampleShadowPCF(float3 wp, float viewDepth)
         }
     }
     return sum / 25.0f;
+}
+
+
+static const float ATMO_PI = 3.14159265f;
+
+//3/(16 pi) * (1 + cos^2)
+float AtmoPhaseR(float c) { return 3.0f / (16.0f * ATMO_PI) * (1.0f + c * c); }
+
+float AtmoPhaseHG(float c, float g)
+{
+    float g2 = g * g;
+    return (1.0f - g2) / (4.0f * ATMO_PI * pow(max(1.0f + g2 - 2.0f * g * c, 1e-4f), 1.5f));
+}
+
+float AtmoPathScale(float cosZ)
+{
+    float c = saturate(cosZ);
+    float aDeg = degrees(acos(c));
+    return 1.0f / (c + 0.15f * pow(max(93.885f - aDeg, 1e-3f), -1.253f));
+}
+
+float3 AtmoSunLight(float3 toSun)
+{
+    float k = AtmoPathScale(toSun.y);
+    float3 tau = AtmoRayleigh.xyz * (AtmoRayleigh.w * k) + AtmoMie.xxx * (AtmoMie.w * k);
+    return AtmoSun.w * exp(-tau);
+}
+
+float3 AtmoSky(float3 v)
+{
+    float3 sigR = AtmoRayleigh.xyz;
+    float3 sigM = AtmoMie.xxx;
+    float3 sumS = sigR + sigM;
+    float  k    = AtmoPathScale(max(v.y, 0.0f));
+    float  sAir = AtmoRayleigh.w * k;
+    float  sHaze = AtmoMie.w * k;
+    float  c  = dot(v, AtmoSun.xyz);
+    float  pR = AtmoPhaseR(c);
+    float  pM = AtmoPhaseHG(c, AtmoMie.y);
+    float3 inner = (sigR * pR + sigM * pM) / sumS * (1.0f - exp(-sumS * sHaze));
+    float3 outer = pR * (1.0f - exp(-sigR * (sAir - sHaze))) * exp(-sumS * sHaze);
+    return AtmoSunLight(AtmoSun.xyz) * (inner + outer);
+}
+
+float3 AtmoApply(float3 color, float3 wp)
+{
+    float3 d = wp - CameraPos.xyz;
+    float dist = length(d);
+    float3 v = d / max(dist, 1e-4f);
+    float s = dist * AtmoMie.z;
+    float3 sigR = AtmoRayleigh.xyz;
+    float3 sigM = AtmoMie.xxx;
+    float3 sumS = sigR + sigM;
+    float3 Ft = exp(-sumS * s);
+    float c = dot(v, AtmoSun.xyz);
+    float3 Lin = (sigR * AtmoPhaseR(c) + sigM * AtmoPhaseHG(c, AtmoMie.y)) / sumS
+               * AtmoSunLight(AtmoSun.xyz) * (1.0f - Ft);
+    return color * Ft + Lin;
 }
 
 float4 PSMain(FSQ i):SV_TARGET{
@@ -919,7 +970,14 @@ float4 PSMain(FSQ i):SV_TARGET{
         float3 e = alb * 3.2f;
         return float4(e, 1.0f);
     }
-    if(dot(nrm,nrm)<0.01f) return float4(0.02f,0.02f,0.05f,1);
+    if(dot(nrm,nrm)<0.01f)
+    {
+        float2 ndc = float2(i.UV.x * 2.0f - 1.0f, 1.0f - i.UV.y * 2.0f);
+        float3 rayDir = normalize(AtmoCamForward.xyz
+                                + AtmoCamRight.xyz * (ndc.x * AtmoCamRight.w)
+                                + AtmoCamUp.xyz    * (ndc.y * AtmoCamUp.w));
+        return float4(AtmoSky(rayDir), 1.0f);
+    }
     float3 N=normalize(nrm), wp=gWorldPos.Sample(gSampler,i.UV).rgb;
     float3 V=normalize(CameraPos.xyz-wp);
     float viewDepth = mul(float4(wp,1.0f), CameraView).z;   // depth used to pick the cascade
@@ -960,6 +1018,7 @@ float4 PSMain(FSQ i):SV_TARGET{
                               : float3(1,1,0.4f);
         if (viewDepth <= CascadeSplits.w) col = lerp(col, col*tint, 0.55f);
     }
+    if (AtmoCamForward.w > 0.5f) col = AtmoApply(col, wp);
     return float4(col,1);
 }
 )HLSL";

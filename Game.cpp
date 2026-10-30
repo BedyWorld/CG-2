@@ -13,6 +13,13 @@ static const float kTileSize = 1024.0f;
 static const float kLodBoost = 1.0f;
 static constexpr float PI = 3.14159265f;
 
+static const float kAtmoSunIntensity = 40.0f;
+static const float kAtmoMieBase = 3.0e-5f;
+static const float kAtmoMieG = 0.76f;
+static const float kAtmoMetersPerUnit = 40.0f;
+static const float kAtmoMieClean = 0.5f;
+static const float kAtmoMieDirty = 5.0f;
+
 static inline XMFLOAT3 F3Add(XMFLOAT3 a, XMFLOAT3 b) { return { a.x + b.x,a.y + b.y,a.z + b.z }; }
 static inline XMFLOAT3 F3Sub(XMFLOAT3 a, XMFLOAT3 b) { return { a.x - b.x,a.y - b.y,a.z - b.z }; }
 static inline XMFLOAT3 F3Scale(XMFLOAT3 a, float s) { return { a.x * s,a.y * s,a.z * s }; }
@@ -155,8 +162,17 @@ void Game::OnKeyDown(int vkey)
     }
     if (vkey == 'V') { debugMode_ = (debugMode_ + 1) % 3; return; }
     if (vkey == 'I') { instancesEnabled_ = !instancesEnabled_; return; }
+    if (vkey == '9') { atmoOnObjects_ = !atmoOnObjects_; return; }
+    if (vkey == '0')
+    {
+        atmoDirty_ = !atmoDirty_;
+        atmoRayleighT_ = 1.0f;
+        atmoMieT_ = atmoDirty_ ? kAtmoMieDirty : kAtmoMieClean;
+        return;
+    }
     if (vkey == VK_OEM_PLUS || vkey == VK_ADD)       dispScale_ = min(dispScale_ + 0.05f, 2.0f);
     if (vkey == VK_OEM_MINUS || vkey == VK_SUBTRACT) dispScale_ = max(dispScale_ - 0.05f, 0.0f);
+
 }
 
 void Game::ClearStuckLights()
@@ -314,7 +330,7 @@ void Game::LoadSceneGeometry2()
     std::wstring dir(exePath);
     dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
 
-    ObjResult obj = LoadObj(dir + L"model2.obj");
+    ObjResult obj = LoadObj(dir + L"Cheryl.obj");
     if (obj.valid) { rs_->BuildBuffers2(obj.vertices, obj.indices); return; }
 
     const int SLICES = 16, STACKS = 8;
@@ -938,8 +954,27 @@ void Game::Update(float deltaTime)
     rs_->ClearLights();
 
     {
-        float sa = time_ * 0.15f;
-        sunDir_ = { sinf(sa), -0.6f - 0.3f * cosf(time_ * 0.07f), cosf(sa) };
+        const float dt = deltaTime;
+        if (GetAsyncKeyState('1') & 0x8000) atmoRayleighT_ *= expf(-1.0f * dt);
+        if (GetAsyncKeyState('2') & 0x8000) atmoRayleighT_ *= expf(1.0f * dt);
+        if (GetAsyncKeyState('3') & 0x8000) atmoMieT_ *= expf(-1.5f * dt);
+        if (GetAsyncKeyState('4') & 0x8000) atmoMieT_ *= expf(1.5f * dt);
+        if (GetAsyncKeyState('5') & 0x8000) sunElevationDeg_ -= 30.0f * dt;
+        if (GetAsyncKeyState('6') & 0x8000) sunElevationDeg_ += 30.0f * dt;
+        if (GetAsyncKeyState('7') & 0x8000) sunAzimuthDeg_ -= 60.0f * dt;
+        if (GetAsyncKeyState('8') & 0x8000) sunAzimuthDeg_ += 60.0f * dt;
+        atmoRayleighT_ = max(0.05f, min(8.0f, atmoRayleighT_));
+        atmoMieT_ = max(0.02f, min(50.0f, atmoMieT_));
+        sunElevationDeg_ = max(3.0f, min(90.0f, sunElevationDeg_));
+
+        const float k = 1.0f - expf(-3.0f * dt);
+        atmoRayleigh_ += (atmoRayleighT_ - atmoRayleigh_) * k;
+        atmoMie_ += (atmoMieT_ - atmoMie_) * k;
+
+        const float az = XMConvertToRadians(sunAzimuthDeg_);
+        const float el = XMConvertToRadians(sunElevationDeg_);
+        sunToward_ = { cosf(el) * sinf(az), sinf(el), cosf(el) * cosf(az) };
+        sunDir_ = { -sunToward_.x, -sunToward_.y, -sunToward_.z };
         sunLightIndex_ = 0;
         rs_->AddDirectionalLight(sunDir_, { 1.f,.92f,.75f }, 1.4f);
     }
@@ -1034,6 +1069,22 @@ void Game::Update(float deltaTime)
         lCB.ShadowLightIndex = -1;
     }
     lCB.CameraPos = { camPos_.x,camPos_.y,camPos_.z,1.f };
+    {
+        XMMATRIX invV = XMMatrixInverse(nullptr, viewMatrix_);
+        const float tanY = tanf(XMConvertToRadians(75.f) * 0.5f);
+        const float tanX = tanY * aspect;
+        XMFLOAT3 r, u, f;
+        XMStoreFloat3(&r, XMVector3Normalize(invV.r[0]));
+        XMStoreFloat3(&u, XMVector3Normalize(invV.r[1]));
+        XMStoreFloat3(&f, XMVector3Normalize(invV.r[2]));
+        lCB.AtmoCamRight = { r.x, r.y, r.z, tanX };
+        lCB.AtmoCamUp = { u.x, u.y, u.z, tanY };
+        lCB.AtmoCamForward = { f.x, f.y, f.z, atmoOnObjects_ ? 1.0f : 0.0f };
+        lCB.AtmoSun = { sunToward_.x, sunToward_.y, sunToward_.z, kAtmoSunIntensity };
+        lCB.AtmoRayleigh = { 6.95e-6f * atmoRayleigh_, 1.18e-5f * atmoRayleigh_,
+                               2.44e-5f * atmoRayleigh_, 8400.0f };
+        lCB.AtmoMie = { kAtmoMieBase * atmoMie_, kAtmoMieG, kAtmoMetersPerUnit, 1250.0f };
+    }
     rs_->UpdateLightingPassCB(lCB);
 
     const float MESH2_NEAR = 1.5f;

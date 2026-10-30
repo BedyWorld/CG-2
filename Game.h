@@ -74,21 +74,29 @@ public:
     std::vector<int> shadowSubMeshes_;
     float frameMsAvg_ = 16.0f;
     int  statSubTotal_ = 0;
+    
+    float sunAzimuthDeg_ = 30.f;
+    float sunElevationDeg_ = 45.f;
+    float atmoRayleigh_ = 1.0f, atmoRayleighT_ = 1.0f;
+    float atmoMie_ = 0.5f, atmoMieT_ = 0.5f;
+    bool  atmoOnObjects_ = true;
+    bool  atmoDirty_ = false;
+    XMFLOAT3 sunToward_ = { 0.f, 1.f, 0.f };
 
-    bool  frustumCullEnabled_ = true;   // клавиша F
-    bool  octreeCullEnabled_ = true;   // клавиша O
-    bool  tessEnabled_ = true;   // клавиша T
-    bool  instancesEnabled_ = false;  // клавиша I, по умолчанию выключены
+    bool  frustumCullEnabled_ = true;
+    bool  octreeCullEnabled_ = true;
+    bool  tessEnabled_ = true;
+    bool  instancesEnabled_ = false;
     bool  xrayEnabled_ = true;
-    bool  shadowsEnabled_ = true;   // клавиша C — каскадные тени
-    bool  particlesEnabled_ = true;   // клавиша P
+    bool  shadowsEnabled_ = true;
+    bool  particlesEnabled_ = true;
     ParticleCB particleCB_ = {};
-    bool  wireframe_ = false;   // клавиша G — каркасный режим
-    int   debugMode_ = 0;      // клавиша V: 0 выкл, 1 каскады, 2 карта теней
+    bool  wireframe_ = false;
+    int   debugMode_ = 0;
 
     void     RenderShadowCascades();
-    XMFLOAT3 sunDir_ = { 0,-1,0 };   // направление источника, отбрасывающего тени
-    int      sunLightIndex_ = -1;    // его индекс в массиве Lights
+    XMFLOAT3 sunDir_ = { 0,-1,0 };
+    int      sunLightIndex_ = -1;
     int   statVisible_ = 0;
     int   statNodesVisited_ = 0;
     float statCullMs_ = 0.0f;
@@ -101,9 +109,9 @@ public:
     float waterAmpScale_ = 1.0f;
 
 private:
-    void LoadSceneGeometry();      // Sponza — загрузка меша + текстур через BuildMesh1
-    void LoadSceneGeometry2();     // вторая модель
-    void LoadSceneTextures2();     // текстуры второй модели
+    void LoadSceneGeometry();
+    void LoadSceneGeometry2();
+    void LoadSceneTextures2();
 
     bool RaycastMesh(XMFLOAT3 origin, XMFLOAT3 dir, float maxDist, float& outT) const;
     static bool RayTriangle(XMFLOAT3 orig, XMFLOAT3 dir,
@@ -113,10 +121,10 @@ private:
     {
         XMFLOAT3 bmin;
         XMFLOAT3 bmax;
-        int      left = -1;      // индекс левого потомка  (-1 у листа)
-        int      right = -1;     // индекс правого потомка (-1 у листа)
-        int      first = 0;      // первый треугольник в triIndices_ (лист)
-        int      count = 0;      // кол-во треугольников (0 у внутреннего узла)
+        int      left = -1;
+        int      right = -1;
+        int      first = 0;
+        int      count = 0;
     };
 
     void BuildBVH();

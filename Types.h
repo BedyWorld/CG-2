@@ -55,7 +55,6 @@ enum class LightType : UINT
     Spot        = 2,
 };
 
-// Один источник света (GPU-совместимый, 96 байт)
 struct LightData
 {
     XMFLOAT4 PositionWS;
@@ -65,7 +64,7 @@ struct LightData
     float    SpotInnerCosine;
     float    SpotOuterCosine;
     UINT     Type;
-};  // 96 bytes
+};
 
 static const UINT MAX_LIGHTS = 16;
 
@@ -99,13 +98,22 @@ struct LightingPassCB
     LightData Lights[MAX_LIGHTS];
 
     //каскадные тени
-    XMFLOAT4X4 ShadowViewProj[MAX_CASCADES];   // матрицы света по каскадам
-    XMFLOAT4   CascadeSplits;                  // дальние границы во view-space
-    XMFLOAT4X4 CameraView;                     // нужна для глубины в view-space
-    int        ShadowLightIndex;               // -1 = теней нет
+    XMFLOAT4X4 ShadowViewProj[MAX_CASCADES];
+    XMFLOAT4   CascadeSplits;
+    XMFLOAT4X4 CameraView;
+    int        ShadowLightIndex;
     float      ShadowMapSize;
     float      ShadowBias;
-    float      DebugCascades;      // >0.5 — подкрасить каскады (клавиша V)
+    float      DebugCascades;
+    
+    XMFLOAT4 AtmoCamRight;
+    XMFLOAT4 AtmoCamUp;
+    XMFLOAT4 AtmoCamForward;
+    
+    
+    XMFLOAT4 AtmoSun;
+    XMFLOAT4 AtmoRayleigh;
+    XMFLOAT4 AtmoMie;
 };
 
 struct LightBullet
@@ -127,7 +135,8 @@ static_assert(offsetof(LightingPassCB, ShadowViewProj) == 1056, "сдвинул�
 static_assert(offsetof(LightingPassCB, CascadeSplits) == 1312, "сдвинулись границы каскадов");
 static_assert(offsetof(LightingPassCB, CameraView) == 1328, "сдвинулась матрица вида");
 static_assert(offsetof(LightingPassCB, ShadowLightIndex) == 1392, "сдвинулся хвост");
-static_assert(sizeof(LightingPassCB) == 1408, "изменился размер LightingPassCB");
+static_assert(offsetof(LightingPassCB, AtmoCamRight) == 1408, "сдвинулся блок атмосферы");
+static_assert(sizeof(LightingPassCB) == 1504, "изменился размер LightingPassCB");
 
 static_assert(offsetof(ConstantBufferData, CameraPos) == 192, "ConstantBufferData: CameraPos");
 static_assert(offsetof(ConstantBufferData, BlendFactor) == 224, "ConstantBufferData: BlendFactor");
